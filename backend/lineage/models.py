@@ -20,6 +20,13 @@ class ColumnNode:
     source_cell: int | None
     source_line: int | None
 
+    def __post_init__(self) -> None:
+        if self.id != f"{self.table}.{self.column}":
+            raise ValueError(
+                f"ColumnNode.id must equal '{{table}}.{{column}}', "
+                f"got {self.id!r} (table={self.table!r}, column={self.column!r})"
+            )
+
 
 @dataclass
 class LineageEdge:
@@ -29,10 +36,10 @@ class LineageEdge:
         "passthrough", "aggregation", "expression",
         "join_key", "window", "cast", "filter"
     ]
-    expression: str
-    source_file: str
-    source_cell: int | None
-    source_line: int | None
+    expression: str | None = None
+    source_file: str = ""
+    source_cell: int | None = None
+    source_line: int | None = None
 
 
 @dataclass

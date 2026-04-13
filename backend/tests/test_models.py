@@ -16,6 +16,7 @@ def test_column_node_id_format():
     )
     assert node.id == "orders.amount"
     assert node.table == "orders"
+    assert node.id == f"{node.table}.{node.column}"
 
 
 def test_lineage_edge_fields():
