@@ -2,6 +2,7 @@
 from __future__ import annotations
 import uuid
 import networkx as nx
+import git
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from lineage.engine import build_graph_with_warnings
 from lineage.engine import upstream as engine_upstream
@@ -73,6 +74,32 @@ async def register_source(
         zip_bytes = await file.read()
         entry["_zip_bytes"] = zip_bytes
         entry["url"] = file.filename or "upload"
+
+    elif source_type == "git" and url:
+        # Lightweight auth check: ls-remote avoids a full clone
+        if token:
+            auth_url = url.replace("https://", f"https://{token}@", 1) if url.startswith("https://") else url
+        else:
+            auth_url = url
+        try:
+            git.cmd.Git().ls_remote(auth_url)
+        except git.GitCommandError as exc:
+            # Sanitize: never echo back the token-embedded URL
+            raise HTTPException(
+                status_code=400,
+                detail=f"Git authentication failed: {exc.stderr.strip() if exc.stderr else str(exc)}",
+            )
+
+    elif source_type == "databricks" and url:
+        from databricks.sdk import WorkspaceClient
+        try:
+            client = WorkspaceClient(host=url, token=token)
+            list(client.workspace.list(path="/"))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Databricks authentication failed: {exc}",
+            )
 
     state.source_registry[source_id] = entry
     return {k: v for k, v in entry.items() if not k.startswith("_")}
