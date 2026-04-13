@@ -32,10 +32,10 @@ def ingest_git(url: str, token: str | None, source_ref: str) -> list[FileRecord]
         try:
             git.Repo.clone_from(auth_url, tmpdir, depth=1)
         except git.GitCommandError as exc:
-            raise RuntimeError(f"Git clone failed: {exc}") from exc
+            raise RuntimeError(f"Git clone failed for {url} (credentials redacted)") from exc
 
         for root, _dirs, files in os.walk(tmpdir):
-            if ".git" in root:
+            if ".git" in Path(root).parts:
                 continue
             for fname in files:
                 ext = Path(fname).suffix.lower()

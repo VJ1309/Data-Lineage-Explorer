@@ -124,9 +124,10 @@ class _DataFrameTracker(ast.NodeVisitor):
             if attr == "select":
                 cols = []
                 for arg in value.args:
+                    transform = _classify_pyspark_expr(arg)
                     cnames = _extract_col_names(arg)
                     for cname in cnames:
-                        cols.append((cname, "passthrough", cname, [cname], node.lineno))
+                        cols.append((cname, transform, cname, [cname], node.lineno))
                 self.df_sources[var] = src_table
                 self.df_columns[var] = cols
 
@@ -230,6 +231,6 @@ def parse_pyspark(
 
     if source_cell is not None:
         for edge in tracker.edges:
-            object.__setattr__(edge, "source_cell", source_cell)
+            edge.source_cell = source_cell
 
     return tracker.edges

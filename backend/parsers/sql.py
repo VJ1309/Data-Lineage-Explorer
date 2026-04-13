@@ -125,18 +125,37 @@ def parse_sql(
         target_col = f"result.{alias}"
         transform_type, expr_str = _classify_transform(expr_node)
 
-        # For window functions, the col refs are in OVER clause (PARTITION BY, ORDER BY),
-        # not the actual function args. Create a single edge using default_table.
+        # For window functions, extract actual column refs from the window expression
+        # (PARTITION BY / ORDER BY columns) to avoid a self-loop on the output alias.
         if transform_type == "window":
-            edges.append(LineageEdge(
-                source_col=f"{default_table}.{alias}",
-                target_col=target_col,
-                transform_type=transform_type,
-                expression=expr_str,
-                source_file=source_file,
-                source_cell=source_cell,
-                source_line=source_line,
-            ))
+            win_col_refs = list(expr_node.find_all(exp.Column))
+            if win_col_refs:
+                for col_ref in win_col_refs:
+                    table_hint = col_ref.table
+                    col_name = col_ref.name
+                    if not col_name:
+                        continue
+                    resolved_table = cte_map.get(table_hint, table_hint) if table_hint else default_table
+                    edges.append(LineageEdge(
+                        source_col=f"{resolved_table}.{col_name}",
+                        target_col=target_col,
+                        transform_type=transform_type,
+                        expression=expr_str,
+                        source_file=source_file,
+                        source_cell=source_cell,
+                        source_line=source_line,
+                    ))
+            else:
+                # No column refs found — fall back to default_table with a generic marker
+                edges.append(LineageEdge(
+                    source_col=f"{default_table}.*",
+                    target_col=target_col,
+                    transform_type=transform_type,
+                    expression=expr_str,
+                    source_file=source_file,
+                    source_cell=source_cell,
+                    source_line=source_line,
+                ))
             continue
 
         # Find all Column references inside this expression (excluding OVER clause)

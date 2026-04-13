@@ -22,16 +22,24 @@ def ingest_databricks(host: str, token: str, source_ref: str) -> list[FileRecord
     client = WorkspaceClient(host=host, token=token)
     records: list[FileRecord] = []
 
-    def _walk(path: str) -> None:
+    def _walk(path: str, depth: int = 0) -> None:
+        if depth > 20:  # safety cap
+            return
         try:
             items = list(client.workspace.list(path=path))
-        except Exception:
-            return
+        except Exception as exc:
+            if path == "/":
+                raise RuntimeError(f"Failed to list Databricks workspace root: {exc}") from exc
+            return  # sub-path failures are non-fatal
         for item in items:
+            if item.path is None:
+                continue
             if item.object_type == ObjectType.DIRECTORY:
-                _walk(item.path)
+                _walk(item.path, depth + 1)
             elif item.object_type == ObjectType.NOTEBOOK:
-                lang = item.language.value if item.language else "PYTHON"
+                if item.language is None:
+                    continue
+                lang = item.language.value
                 file_type = _LANG_TYPE.get(lang)
                 if file_type is None:
                     continue

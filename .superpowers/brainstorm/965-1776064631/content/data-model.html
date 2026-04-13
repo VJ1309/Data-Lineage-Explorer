@@ -1,0 +1,92 @@
+<h2>Section 2 — Core Data Model</h2>
+<p class="subtitle">How lineage is represented in memory and passed between backend and frontend</p>
+
+<div class="mockup">
+  <div class="mockup-header">Lineage Graph Data Model (JSON Schema)</div>
+  <div class="mockup-body" style="font-family:monospace;font-size:11px;padding:16px;display:flex;gap:16px;flex-wrap:wrap;">
+
+    <!-- Node types -->
+    <div style="flex:1;min-width:240px;">
+      <div style="color:#f0c040;font-size:10px;font-weight:bold;margin-bottom:8px;">NODES (entities)</div>
+
+      <div style="border:1px solid #3d4f6b;border-radius:4px;background:#1a2233;padding:8px;margin-bottom:8px;">
+        <div style="color:#7ec8e3;font-size:10px;margin-bottom:4px;">ColumnNode</div>
+        <div style="color:#a0b4c8;line-height:1.6;">
+          id: <span style="color:#f0c040;">"table.column"</span><br/>
+          table: <span style="color:#4caf7d;">"agg_revenue"</span><br/>
+          column: <span style="color:#4caf7d;">"total_revenue"</span><br/>
+          dtype: <span style="color:#4caf7d;">"double"</span> <span style="color:#555;">| null</span><br/>
+          source_file: <span style="color:#4caf7d;">"revenue_agg.ipynb"</span><br/>
+          source_cell: <span style="color:#f0c040;">4</span> <span style="color:#555;">| null</span><br/>
+          source_line: <span style="color:#f0c040;">12</span> <span style="color:#555;">| null</span>
+        </div>
+      </div>
+
+      <div style="border:1px solid #3d4f6b;border-radius:4px;background:#1a2233;padding:8px;">
+        <div style="color:#7ec8e3;font-size:10px;margin-bottom:4px;">TableNode</div>
+        <div style="color:#a0b4c8;line-height:1.6;">
+          id: <span style="color:#f0c040;">"agg_revenue"</span><br/>
+          columns: <span style="color:#4caf7d;">ColumnNode[]</span><br/>
+          source_file: <span style="color:#4caf7d;">"revenue_agg.ipynb"</span><br/>
+          tags: <span style="color:#4caf7d;">["aggregated", "finance"]</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edge types -->
+    <div style="flex:1;min-width:240px;">
+      <div style="color:#f0c040;font-size:10px;font-weight:bold;margin-bottom:8px;">EDGES (transformations)</div>
+
+      <div style="border:1px solid #3d4f6b;border-radius:4px;background:#1a2233;padding:8px;margin-bottom:8px;">
+        <div style="color:#7ec8e3;font-size:10px;margin-bottom:4px;">LineageEdge</div>
+        <div style="color:#a0b4c8;line-height:1.6;">
+          source_col: <span style="color:#f0c040;">"raw_orders.amount"</span><br/>
+          target_col: <span style="color:#f0c040;">"agg_revenue.total_revenue"</span><br/>
+          transform_type: <span style="color:#4caf7d;">"aggregation"</span><br/>
+          expression: <span style="color:#4caf7d;">"SUM(amount)"</span><br/>
+          source_file: <span style="color:#4caf7d;">"revenue_agg.ipynb"</span><br/>
+          source_cell: <span style="color:#f0c040;">4</span><br/>
+          source_line: <span style="color:#f0c040;">12</span>
+        </div>
+      </div>
+
+      <div style="border:1px solid #3d4f6b;border-radius:4px;background:#1a2233;padding:8px;">
+        <div style="color:#7ec8e3;font-size:10px;margin-bottom:4px;">transform_type values</div>
+        <div style="color:#a0b4c8;line-height:1.8;font-size:10px;">
+          <span style="color:#4caf7d;">passthrough</span> — direct select/alias<br/>
+          <span style="color:#4caf7d;">aggregation</span> — SUM, COUNT, AVG…<br/>
+          <span style="color:#4caf7d;">expression</span> — arithmetic, CASE…<br/>
+          <span style="color:#4caf7d;">join_key</span> — used in JOIN ON<br/>
+          <span style="color:#4caf7d;">window</span> — OVER(), ROW_NUMBER…<br/>
+          <span style="color:#4caf7d;">cast</span> — type conversion<br/>
+          <span style="color:#4caf7d;">filter</span> — used in WHERE/HAVING
+        </div>
+      </div>
+    </div>
+
+    <!-- API response shape -->
+    <div style="flex:2;min-width:280px;">
+      <div style="color:#f0c040;font-size:10px;font-weight:bold;margin-bottom:8px;">API RESPONSE — GET /lineage?table=agg_revenue&column=total_revenue</div>
+      <div style="background:#0a0f1a;border-radius:4px;padding:10px;color:#a0c8ff;line-height:1.6;font-size:10px;">
+        <span style="color:#555;">{</span><br/>
+        &nbsp;&nbsp;<span style="color:#7ec8e3;">"target"</span>: <span style="color:#f0c040;">"agg_revenue.total_revenue"</span>,<br/>
+        &nbsp;&nbsp;<span style="color:#7ec8e3;">"upstream"</span>: [<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#555;">{</span><br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"source"</span>: <span style="color:#f0c040;">"raw_orders.amount"</span>,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"transform_type"</span>: <span style="color:#4caf7d;">"aggregation"</span>,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"expression"</span>: <span style="color:#4caf7d;">"SUM(amount)"</span>,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"source_file"</span>: <span style="color:#4caf7d;">"revenue_agg.ipynb"</span>,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"source_cell"</span>: <span style="color:#f0c040;">4</span>,<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7ec8e3;">"source_line"</span>: <span style="color:#f0c040;">12</span><br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#555;">}</span><br/>
+        &nbsp;&nbsp;],<br/>
+        &nbsp;&nbsp;<span style="color:#7ec8e3;">"downstream"</span>: [...],<br/>
+        &nbsp;&nbsp;<span style="color:#7ec8e3;">"graph"</span>: <span style="color:#555;">{ nodes: [...], edges: [...] }</span><br/>
+        <span style="color:#555;">}</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:16px;">Each lineage response includes upstream ancestry, downstream impact, and the full graph for rendering. Does this data model look right?</p>
