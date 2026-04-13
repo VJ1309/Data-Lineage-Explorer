@@ -1,10 +1,23 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+*.pyc
+*.pyo
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
-.venv
+.venv/
+
+# Environment files
+.env
+
+# Temp and tool dirs
+tmp/
+.superpowers/
+
+# Node / frontend
+node_modules/
+.next/
