@@ -17,6 +17,11 @@ def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarnin
             edges = parse_pyspark(record.content, source_file=record.path)
         elif record.type == "sql":
             edges = parse_sql(record.content, source_file=record.path, source_line=1)
+        else:
+            warnings.append(ParseWarning(
+                file=record.path,
+                error=f"Unknown file type: {record.type!r}",
+            ))
     except Exception as exc:
         warnings.append(ParseWarning(file=record.path, error=str(exc)))
     return edges, warnings
@@ -33,10 +38,6 @@ def build_graph_with_warnings(
         edges, warnings = _parse_file(record)
         all_warnings.extend(warnings)
         for edge in edges:
-            if edge.source_col not in graph:
-                graph.add_node(edge.source_col)
-            if edge.target_col not in graph:
-                graph.add_node(edge.target_col)
             graph.add_edge(edge.source_col, edge.target_col, data=edge)
 
     # Detect cycles and warn
@@ -65,16 +66,20 @@ def upstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
     if col_id not in graph:
         return []
     edges: list[LineageEdge] = []
-    visited: set[str] = set()
+    visited_edges: set[tuple[str, str]] = set()
     queue = [col_id]
+    visited_nodes: set[str] = {col_id}
     while queue:
         current = queue.pop()
         for pred in graph.predecessors(current):
-            if pred not in visited:
-                visited.add(pred)
+            edge_key = (pred, current)
+            if edge_key not in visited_edges:
+                visited_edges.add(edge_key)
                 edge_data = graph.edges[pred, current].get("data")
                 if edge_data:
                     edges.append(edge_data)
+            if pred not in visited_nodes:
+                visited_nodes.add(pred)
                 queue.append(pred)
     return edges
 
@@ -84,15 +89,19 @@ def downstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
     if col_id not in graph:
         return []
     edges: list[LineageEdge] = []
-    visited: set[str] = set()
+    visited_edges: set[tuple[str, str]] = set()
+    visited_nodes: set[str] = {col_id}
     queue = [col_id]
     while queue:
         current = queue.pop()
         for succ in graph.successors(current):
-            if succ not in visited:
-                visited.add(succ)
+            edge_key = (current, succ)
+            if edge_key not in visited_edges:
+                visited_edges.add(edge_key)
                 edge_data = graph.edges[current, succ].get("data")
                 if edge_data:
                     edges.append(edge_data)
+            if succ not in visited_nodes:
+                visited_nodes.add(succ)
                 queue.append(succ)
     return edges
