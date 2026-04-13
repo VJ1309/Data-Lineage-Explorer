@@ -49,7 +49,8 @@ def test_register_upload_source_and_refresh():
     resp = client.post(f"/sources/{source_id}/refresh")
     assert resp.status_code == 200
     refresh_data = resp.json()
-    assert refresh_data.get("file_count", 0) > 0 or refresh_data.get("edge_count", 0) >= 0
+    assert refresh_data["file_count"] > 0
+    assert refresh_data["edge_count"] >= 0
 
     # Tables should now have data
     resp = client.get("/tables")
