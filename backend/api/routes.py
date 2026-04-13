@@ -68,10 +68,17 @@ async def register_source(
         "file_count": 0,
     }
 
+    VALID_SOURCE_TYPES = {"upload", "git", "databricks"}
+    if source_type not in VALID_SOURCE_TYPES:
+        raise HTTPException(status_code=400, detail=f"source_type must be one of: {sorted(VALID_SOURCE_TYPES)}")
+
     if source_type == "upload":
         if file is None:
             raise HTTPException(status_code=400, detail="file is required for upload source")
         zip_bytes = await file.read()
+        MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
+        if len(zip_bytes) > MAX_ZIP_BYTES:
+            raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
         entry["_zip_bytes"] = zip_bytes
         entry["url"] = file.filename or "upload"
 
@@ -95,10 +102,10 @@ async def register_source(
         try:
             client = WorkspaceClient(host=url, token=token)
             list(client.workspace.list(path="/"))
-        except Exception as exc:
+        except Exception:
             raise HTTPException(
                 status_code=400,
-                detail=f"Databricks authentication failed: {exc}",
+                detail="Databricks authentication failed: invalid host or token",
             )
 
     state.source_registry[source_id] = entry
@@ -109,6 +116,18 @@ async def register_source(
 def delete_source(source_id: str):
     if source_id not in state.source_registry:
         raise HTTPException(status_code=404, detail="Source not found")
+    # Remove this source's contributions from lineage graph
+    entry = state.source_registry.get(source_id)
+    if entry:
+        old_files = entry.get("_parsed_files", set())
+        if old_files:
+            edges_to_remove = [
+                (u, v) for u, v, d in state.lineage_graph.edges(data=True)
+                if d.get("data") and d["data"].source_file in old_files
+            ]
+            state.lineage_graph.remove_edges_from(edges_to_remove)
+            orphan_nodes = [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
+            state.lineage_graph.remove_nodes_from(orphan_nodes)
     del state.source_registry[source_id]
     return {"ok": True}
 
@@ -145,14 +164,33 @@ def refresh_source(source_id: str):
                 token=entry.get("_token", ""),
                 source_ref=source_id,
             )
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Databricks ingestion failed: check host and token")
 
     new_graph, new_warnings = build_graph_with_warnings(records)
+
+    # Remove old contributions from this source before adding new ones
+    old_files = entry.get("_parsed_files", set())
+    if old_files:
+        edges_to_remove = [
+            (u, v) for u, v, d in state.lineage_graph.edges(data=True)
+            if d.get("data") and d["data"].source_file in old_files
+        ]
+        state.lineage_graph.remove_edges_from(edges_to_remove)
+        orphan_nodes = [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
+        state.lineage_graph.remove_nodes_from(orphan_nodes)
+
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.parse_warnings.extend(
         {"file": w.file, "error": w.error} for w in new_warnings
     )
+
+    # Track which files this source contributed
+    entry["_parsed_files"] = {
+        d["data"].source_file
+        for _, _, d in new_graph.edges(data=True)
+        if d.get("data") and d["data"].source_file
+    }
 
     entry["status"] = "parsed"
     entry["file_count"] = len(records)
