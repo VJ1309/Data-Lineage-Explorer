@@ -76,7 +76,13 @@ class _DataFrameTracker(ast.NodeVisitor):
         self.source_file = source_file
         self.df_sources: dict[str, str] = {}   # var -> source table
         self.df_columns: dict[str, list[tuple]] = {}  # var -> [(col, transform, expr, src_cols, lineno)]
+        self._join_sources: dict[str, list[str]] = {}  # var -> [table1, table2, ...]
         self.edges: list[LineageEdge] = []
+
+    def _propagate_join_sources(self, target_var: str, source_var: str | None) -> None:
+        """Copy join source info from source_var to target_var."""
+        if source_var and source_var in self._join_sources:
+            self._join_sources[target_var] = list(self._join_sources[source_var])
 
     def _get_read_table(self, node: ast.Call) -> str | None:
         if not isinstance(node.func, ast.Attribute):
@@ -122,14 +128,23 @@ class _DataFrameTracker(ast.NodeVisitor):
             src_table, src_cols = self._resolve_source(src_var)
 
             if attr == "select":
+                # Build a set of join key names from the parent for preservation
+                parent_join_keys = {
+                    c[0] for c in src_cols if c[1] == "join_key"
+                }
                 cols = []
                 for arg in value.args:
                     transform = _classify_pyspark_expr(arg)
                     cnames = _extract_col_names(arg)
                     for cname in cnames:
-                        cols.append((cname, transform, cname, [cname], node.lineno))
+                        # Preserve join_key transform if this column was a join key
+                        if cname in parent_join_keys:
+                            cols.append((cname, "join_key", cname, [cname], node.lineno))
+                        else:
+                            cols.append((cname, transform, cname, [cname], node.lineno))
                 self.df_sources[var] = src_table
                 self.df_columns[var] = cols
+                self._propagate_join_sources(var, src_var)
 
             elif attr == "withColumn" and len(value.args) >= 2:
                 col_name = _get_string_value(value.args[0]) or "unknown"
@@ -141,6 +156,7 @@ class _DataFrameTracker(ast.NodeVisitor):
                 self.df_columns[var] = parent_cols + [
                     (col_name, transform, ast.unparse(expr_node), src_col_names, node.lineno)
                 ]
+                self._propagate_join_sources(var, src_var)
 
             elif attr == "agg":
                 # groupBy(...).agg(...) — src_var is the groupBy call, chase further
@@ -160,17 +176,72 @@ class _DataFrameTracker(ast.NodeVisitor):
                 self.df_sources[var] = inner_table
                 self.df_columns[var] = agg_cols
 
+            elif attr == "join" and (len(value.args) >= 2 or any(kw.arg == "on" for kw in value.keywords)):
+                # df.join(other_df, on=..., how=...)
+                right_arg = value.args[0]
+                right_var = None
+                if isinstance(right_arg, ast.Name):
+                    right_var = right_arg.id
+
+                right_table, right_cols = self._resolve_source(right_var)
+
+                # Extract join keys from the second argument
+                join_keys: list[str] = []
+                if len(value.args) >= 2:
+                    on_arg = value.args[1]
+                    if isinstance(on_arg, ast.Constant) and isinstance(on_arg.value, str):
+                        join_keys = [on_arg.value]
+                    elif isinstance(on_arg, ast.List):
+                        for elt in on_arg.elts:
+                            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                join_keys.append(elt.value)
+                    else:
+                        join_keys.extend(_extract_col_names(on_arg))
+                # Also check 'on' keyword argument
+                for kw in value.keywords:
+                    if kw.arg == "on":
+                        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            join_keys = [kw.value.value]
+                        elif isinstance(kw.value, ast.List):
+                            for elt in kw.value.elts:
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                    join_keys.append(elt.value)
+                        else:
+                            join_keys.extend(_extract_col_names(kw.value))
+
+                # Merge columns from both sides
+                merged_cols = list(src_cols)
+                for rc in right_cols:
+                    if rc not in merged_cols:
+                        merged_cols.append(rc)
+
+                # Add join key columns if not already tracked
+                for jk in join_keys:
+                    # Record join key from left side
+                    jk_entry = (jk, "join_key", jk, [jk], node.lineno)
+                    if jk_entry not in merged_cols:
+                        merged_cols.append(jk_entry)
+
+                # Track both source tables
+                self.df_sources[var] = src_table
+                self.df_columns[var] = merged_cols
+                self._join_sources[var] = [src_table]
+                if right_table != "unknown":
+                    self._join_sources[var].append(right_table)
+
             elif attr in ("filter", "where", "dropDuplicates", "drop", "limit",
                           "orderBy", "sort", "distinct", "repartition", "cache"):
                 # Pass-through operations: inherit parent df
                 self.df_sources[var] = src_table
                 self.df_columns[var] = list(src_cols)
+                self._propagate_join_sources(var, src_var)
 
             else:
                 # Unknown op: inherit if possible
                 if src_var and src_var in self.df_sources:
                     self.df_sources[var] = src_table
                     self.df_columns[var] = list(src_cols)
+                    self._propagate_join_sources(var, src_var)
 
         self.generic_visit(node)
 
@@ -199,18 +270,32 @@ class _DataFrameTracker(ast.NodeVisitor):
             return
 
         src_table, cols = self._resolve_source(src_var)
+        join_sources = self._join_sources.get(src_var, [])
 
         for (col_name, transform_type, expr_str, src_cols, lineno) in cols:
             for sc in (src_cols or [col_name]):
-                self.edges.append(LineageEdge(
-                    source_col=f"{src_table}.{sc}",
-                    target_col=f"{target_table}.{col_name}",
-                    transform_type=transform_type,
-                    expression=expr_str,
-                    source_file=self.source_file,
-                    source_cell=None,
-                    source_line=lineno,
-                ))
+                # For join_key columns, emit edges from all joined tables
+                if transform_type == "join_key" and join_sources:
+                    for jtable in join_sources:
+                        self.edges.append(LineageEdge(
+                            source_col=f"{jtable}.{sc}",
+                            target_col=f"{target_table}.{col_name}",
+                            transform_type=transform_type,
+                            expression=expr_str,
+                            source_file=self.source_file,
+                            source_cell=None,
+                            source_line=lineno,
+                        ))
+                else:
+                    self.edges.append(LineageEdge(
+                        source_col=f"{src_table}.{sc}",
+                        target_col=f"{target_table}.{col_name}",
+                        transform_type=transform_type,
+                        expression=expr_str,
+                        source_file=self.source_file,
+                        source_cell=None,
+                        source_line=lineno,
+                    ))
 
         self.generic_visit(node)
 

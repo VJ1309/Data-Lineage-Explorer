@@ -47,7 +47,7 @@ def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
         if from_clause:
             table_expr = from_clause.this
             if isinstance(table_expr, exp.Table):
-                cte_map[alias] = table_expr.name
+                cte_map[alias] = _qualified_table_name(table_expr)
     return cte_map
 
 
@@ -58,36 +58,36 @@ def _find_select(statement: exp.Expression) -> exp.Select | None:
     return statement.find(exp.Select)
 
 
+def _qualified_table_name(table: exp.Table) -> str:
+    """Return schema-qualified table name when schema is present."""
+    name = table.name
+    schema = table.db  # SQLGlot uses .db for the schema part
+    catalog = table.catalog
+    if catalog and schema:
+        return f"{catalog}.{schema}.{name}"
+    if schema:
+        return f"{schema}.{name}"
+    return name
+
+
 def _find_target_table(statement: exp.Expression) -> str:
     """Extract the target table name from INSERT INTO or CREATE TABLE AS SELECT."""
     if isinstance(statement, exp.Insert):
         if isinstance(statement.this, exp.Table):
-            return statement.this.name
+            return _qualified_table_name(statement.this)
     elif isinstance(statement, exp.Create):
         if isinstance(statement.this, exp.Table):
-            return statement.this.name
+            return _qualified_table_name(statement.this)
     return "result"
 
 
-def parse_sql(
-    sql: str,
+def _parse_single_statement(
+    statement: exp.Expression,
     source_file: str,
     source_line: int | None,
-    source_cell: int | None = None,
+    source_cell: int | None,
 ) -> list[LineageEdge]:
-    """Parse a SQL statement and return column-level lineage edges.
-
-    Uses "result" as the synthetic target table name when no INTO/CREATE is present.
-    Returns empty list on parse error (non-fatal).
-    """
-    try:
-        statement = sqlglot.parse_one(sql, dialect="databricks")
-    except Exception:
-        return []
-
-    if statement is None:
-        return []
-
+    """Parse a single SQL statement and return column-level lineage edges."""
     select_node = _find_select(statement)
     if select_node is None:
         return []
@@ -97,26 +97,43 @@ def parse_sql(
     edges: list[LineageEdge] = []
 
     # Collect source tables from FROM + JOINs
-    # SQLGlot uses 'from_' as the arg key for FROM clause
     from_clause = select_node.args.get("from_")
     if from_clause is None:
         return []
 
+    # Build alias -> qualified name map for FROM/JOIN tables
+    alias_map: dict[str, str] = {}
     source_tables: list[str] = []
     from_table = from_clause.this
     if isinstance(from_table, exp.Table):
-        tname = from_table.alias_or_name
-        source_tables.append(cte_map.get(tname, tname))
+        qualified = _qualified_table_name(from_table)
+        alias = from_table.alias
+        resolved = cte_map.get(from_table.name, qualified)
+        if alias:
+            alias_map[alias] = resolved
+        source_tables.append(resolved)
     elif isinstance(from_table, exp.Subquery):
         source_tables.append("subquery")
 
     for join in select_node.find_all(exp.Join):
         jtable = join.this
         if isinstance(jtable, exp.Table):
-            tname = jtable.alias_or_name
-            source_tables.append(cte_map.get(tname, tname))
+            qualified = _qualified_table_name(jtable)
+            alias = jtable.alias
+            resolved = cte_map.get(jtable.name, qualified)
+            if alias:
+                alias_map[alias] = resolved
+            source_tables.append(resolved)
 
     default_table = source_tables[0] if source_tables else "unknown"
+
+    def _resolve_table_hint(hint: str) -> str:
+        """Resolve a table alias/name through alias_map, then cte_map."""
+        if hint in alias_map:
+            return alias_map[hint]
+        if hint in cte_map:
+            return cte_map[hint]
+        return hint
 
     # Walk SELECT expressions
     for sel in select_node.selects:
@@ -138,7 +155,6 @@ def parse_sql(
         transform_type, expr_str = _classify_transform(expr_node)
 
         # For window functions, extract actual column refs from the window expression
-        # (PARTITION BY / ORDER BY columns) to avoid a self-loop on the output alias.
         if transform_type == "window":
             win_col_refs = list(expr_node.find_all(exp.Column))
             if win_col_refs:
@@ -147,7 +163,7 @@ def parse_sql(
                     col_name = col_ref.name
                     if not col_name:
                         continue
-                    resolved_table = cte_map.get(table_hint, table_hint) if table_hint else default_table
+                    resolved_table = _resolve_table_hint(table_hint) if table_hint else default_table
                     edges.append(LineageEdge(
                         source_col=f"{resolved_table}.{col_name}",
                         target_col=target_col,
@@ -158,7 +174,6 @@ def parse_sql(
                         source_line=source_line,
                     ))
             else:
-                # No column refs found — fall back to default_table with a generic marker
                 edges.append(LineageEdge(
                     source_col=f"{default_table}.*",
                     target_col=target_col,
@@ -170,11 +185,9 @@ def parse_sql(
                 ))
             continue
 
-        # Find all Column references inside this expression (excluding OVER clause)
         col_refs = list(expr_node.find_all(exp.Column))
 
         if not col_refs:
-            # No column refs (constant, function with no col args) — create edge to unknown
             edges.append(LineageEdge(
                 source_col=f"{default_table}.{alias}",
                 target_col=target_col,
@@ -192,7 +205,7 @@ def parse_sql(
             if not col_name:
                 continue
             if table_hint:
-                resolved_table = cte_map.get(table_hint, table_hint)
+                resolved_table = _resolve_table_hint(table_hint)
             else:
                 resolved_table = default_table
             source_col = f"{resolved_table}.{col_name}"
@@ -207,4 +220,31 @@ def parse_sql(
                 source_line=source_line,
             ))
 
+    return edges
+
+
+def parse_sql(
+    sql: str,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None = None,
+) -> list[LineageEdge]:
+    """Parse SQL (single or multi-statement) and return column-level lineage edges.
+
+    Supports multiple statements separated by semicolons.
+    Uses "result" as the synthetic target table name when no INTO/CREATE is present.
+    Returns empty list on parse error (non-fatal).
+    """
+    try:
+        statements = sqlglot.parse(sql, dialect="databricks")
+    except Exception:
+        return []
+
+    edges: list[LineageEdge] = []
+    for statement in statements:
+        if statement is None:
+            continue
+        edges.extend(
+            _parse_single_statement(statement, source_file, source_line, source_cell)
+        )
     return edges

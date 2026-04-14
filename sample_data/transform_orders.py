@@ -5,6 +5,7 @@ spark = SparkSession.builder.appName("OrderTransform").getOrCreate()
 
 # Load raw source
 raw = spark.read.table("raw_orders")
+customers = spark.read.table("customer_dim")
 
 # Clean and enrich orders
 cleaned = (
@@ -17,6 +18,11 @@ cleaned = (
 
 # Write to staging table
 cleaned.write.saveAsTable("stg_orders")
+
+# Join with customer dimension and aggregate
+enriched = cleaned.join(customers, "customer_id")
+result = enriched.select("order_id", "customer_id", "customer_name", "amount", "region")
+result.write.saveAsTable("enriched_orders")
 
 # Aggregate by customer
 agg = (

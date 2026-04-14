@@ -69,3 +69,58 @@ def test_source_line_attached():
     for edge in edges:
         assert edge.source_line is not None
         assert edge.source_line > 0
+
+
+JOIN_SIMPLE = """\
+orders = spark.read.table("raw_orders")
+customers = spark.read.table("customer_dim")
+joined = orders.join(customers, "customer_id")
+result = joined.select("order_id", "customer_id", "customer_name")
+result.write.saveAsTable("enriched_orders")
+"""
+
+JOIN_LIST_KEYS = """\
+orders = spark.read.table("raw_orders")
+customers = spark.read.table("customer_dim")
+joined = orders.join(customers, ["customer_id", "region_id"])
+result = joined.select("order_id", "customer_id", "region_id", "customer_name")
+result.write.saveAsTable("enriched_orders")
+"""
+
+JOIN_ON_KEYWORD = """\
+orders = spark.read.table("raw_orders")
+customers = spark.read.table("customer_dim")
+joined = orders.join(customers, on="customer_id")
+result = joined.select("order_id", "customer_id", "customer_name")
+result.write.saveAsTable("enriched_orders")
+"""
+
+
+def test_join_simple_key():
+    edges = parse_pyspark(JOIN_SIMPLE, source_file="pipeline.py")
+    targets = {e.target_col for e in edges}
+    assert "enriched_orders.order_id" in targets
+    assert "enriched_orders.customer_id" in targets
+    assert "enriched_orders.customer_name" in targets
+    # Join key should have join_key transform from both tables
+    jk_edges = [e for e in edges if e.transform_type == "join_key"]
+    assert len(jk_edges) >= 1
+    jk_sources = {e.source_col for e in jk_edges}
+    assert "raw_orders.customer_id" in jk_sources or "customer_dim.customer_id" in jk_sources
+
+
+def test_join_list_keys():
+    edges = parse_pyspark(JOIN_LIST_KEYS, source_file="pipeline.py")
+    jk_edges = [e for e in edges if e.transform_type == "join_key"]
+    jk_target_cols = {e.target_col.split(".")[-1] for e in jk_edges}
+    assert "customer_id" in jk_target_cols
+    assert "region_id" in jk_target_cols
+
+
+def test_join_on_keyword():
+    edges = parse_pyspark(JOIN_ON_KEYWORD, source_file="pipeline.py")
+    targets = {e.target_col for e in edges}
+    assert "enriched_orders.order_id" in targets
+    assert "enriched_orders.customer_name" in targets
+    jk_edges = [e for e in edges if e.transform_type == "join_key"]
+    assert len(jk_edges) >= 1

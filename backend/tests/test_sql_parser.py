@@ -54,3 +54,71 @@ def test_bad_sql_returns_empty_not_raises():
     edges = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
     assert isinstance(edges, list)
     assert len(edges) == 0
+
+
+def test_multi_statement_sql():
+    sql = """
+    INSERT INTO staging_orders
+    SELECT order_id, amount FROM raw_orders;
+
+    INSERT INTO agg_revenue
+    SELECT customer_id, SUM(amount) AS total FROM staging_orders GROUP BY customer_id;
+    """
+    edges = parse_sql(sql, source_file="multi.sql", source_line=1)
+    # Should have edges for both statements
+    targets = {e.target_col for e in edges}
+    assert "staging_orders.order_id" in targets
+    assert "staging_orders.amount" in targets
+    assert "agg_revenue.total" in targets
+    assert "agg_revenue.customer_id" in targets
+    # Check second statement references staging_orders as source
+    agg_edge = next(e for e in edges if e.target_col == "agg_revenue.total")
+    assert agg_edge.source_col == "staging_orders.amount"
+    assert agg_edge.transform_type == "aggregation"
+
+
+def test_schema_qualified_target():
+    sql = "INSERT INTO analytics.revenue_summary SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    assert "analytics.revenue_summary.total" in targets
+    assert "analytics.revenue_summary.customer_id" in targets
+
+
+def test_schema_qualified_source():
+    sql = "SELECT o.order_id, o.amount FROM staging.raw_orders o"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert "staging.raw_orders.order_id" in sources
+    assert "staging.raw_orders.amount" in sources
+
+
+def test_schema_qualified_join():
+    sql = """
+    INSERT INTO analytics.mart_orders
+    SELECT o.order_id, c.customer_name
+    FROM staging.orders o
+    JOIN staging.customers c ON o.customer_id = c.customer_id
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "analytics.mart_orders.order_id" in targets
+    assert "analytics.mart_orders.customer_name" in targets
+    assert "staging.orders.order_id" in sources
+    assert "staging.customers.customer_name" in sources
+
+
+def test_multi_statement_with_empty_statements():
+    sql = "SELECT a FROM t1; ; SELECT b FROM t2;"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    assert "result.a" in targets
+    assert "result.b" in targets
+
+
+def test_catalog_schema_table():
+    sql = "SELECT col1 FROM my_catalog.my_schema.my_table"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert "my_catalog.my_schema.my_table.col1" in sources
