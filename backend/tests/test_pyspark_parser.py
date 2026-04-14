@@ -124,3 +124,63 @@ def test_join_on_keyword():
     assert "enriched_orders.customer_name" in targets
     jk_edges = [e for e in edges if e.transform_type == "join_key"]
     assert len(jk_edges) >= 1
+
+
+SPARK_SQL_CREATE_VIEW = '''\
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW Cost_To_Recv AS (
+    WITH CTR_DTLS AS (
+        SELECT TRK_NUM, CARR_CD FROM raw_shipments
+    )
+    SELECT TRK_NUM, CARR_CD FROM CTR_DTLS
+)
+""")
+'''
+
+SPARK_SQL_INSERT = '''\
+spark.sql("""
+INSERT INTO agg_orders
+SELECT customer_id, SUM(amount) AS total
+FROM raw_orders
+GROUP BY customer_id
+""")
+'''
+
+SPARK_SQL_ASSIGN = '''\
+df = spark.sql("""
+SELECT order_id, amount FROM raw_orders
+""")
+df.write.saveAsTable("staging_orders")
+'''
+
+
+def test_spark_sql_create_view():
+    edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
+    assert len(edges) >= 2
+    targets = {e.target_col for e in edges}
+    assert "Cost_To_Recv.TRK_NUM" in targets
+    assert "Cost_To_Recv.CARR_CD" in targets
+
+
+def test_spark_sql_insert():
+    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py")
+    assert len(edges) >= 2
+    targets = {e.target_col for e in edges}
+    assert "agg_orders.customer_id" in targets
+    assert "agg_orders.total" in targets
+    agg_edge = next(e for e in edges if e.target_col == "agg_orders.total")
+    assert agg_edge.transform_type == "aggregation"
+
+
+def test_spark_sql_assign():
+    """df = spark.sql('SELECT ...') should emit edges from the SQL."""
+    edges = parse_pyspark(SPARK_SQL_ASSIGN, source_file="pipeline.py")
+    # The spark.sql() SELECT produces edges with target "result"
+    sql_edges = [e for e in edges if "result." in e.target_col or "raw_orders." in e.source_col]
+    assert len(sql_edges) >= 2
+
+
+def test_spark_sql_source_line():
+    edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
+    for edge in edges:
+        assert edge.source_line is not None

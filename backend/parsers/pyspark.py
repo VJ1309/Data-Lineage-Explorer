@@ -2,6 +2,7 @@
 from __future__ import annotations
 import ast
 from lineage.models import LineageEdge
+from parsers.sql import parse_sql as _parse_sql
 
 
 def _get_string_value(node: ast.expr) -> str | None:
@@ -98,6 +99,21 @@ class _DataFrameTracker(ast.NodeVisitor):
             return _get_string_value(node.args[0])
         return None
 
+    def _get_spark_sql(self, node: ast.Call) -> str | None:
+        """Extract SQL string from spark.sql('...') calls."""
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "sql":
+            return None
+        if not node.args:
+            return None
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        # Handle f-strings or concatenation — skip (too complex)
+        if isinstance(arg, ast.JoinedStr):
+            return None
+        return None
+
     def _resolve_source(self, var: str | None) -> tuple[str, list[tuple]]:
         """Return (source_table, columns) for a df variable."""
         if var is None:
@@ -118,6 +134,18 @@ class _DataFrameTracker(ast.NodeVisitor):
             if tname:
                 self.df_sources[var] = tname
                 self.df_columns[var] = []
+                self.generic_visit(node)
+                return
+
+            # df = spark.sql("SELECT ...") — parse SQL and emit edges directly
+            sql_str = self._get_spark_sql(value)
+            if sql_str:
+                sql_edges = _parse_sql(
+                    sql_str,
+                    source_file=self.source_file,
+                    source_line=node.lineno,
+                )
+                self.edges.extend(sql_edges)
                 self.generic_visit(node)
                 return
 
@@ -250,6 +278,19 @@ class _DataFrameTracker(ast.NodeVisitor):
             self.generic_visit(node)
             return
         call = node.value
+
+        # Handle standalone spark.sql("...") calls (e.g., CREATE VIEW)
+        sql_str = self._get_spark_sql(call)
+        if sql_str:
+            sql_edges = _parse_sql(
+                sql_str,
+                source_file=self.source_file,
+                source_line=node.lineno,
+            )
+            self.edges.extend(sql_edges)
+            self.generic_visit(node)
+            return
+
         target_table = self._get_write_table(call)
         if target_table is None:
             self.generic_visit(node)
