@@ -70,6 +70,21 @@ def _qualified_table_name(table: exp.Table) -> str:
     return name
 
 
+def _is_temp_view(statement: exp.Expression) -> bool:
+    """Check if a statement creates a temporary view."""
+    if not isinstance(statement, exp.Create):
+        return False
+    kind = (statement.args.get("kind") or "").upper()
+    if kind != "VIEW":
+        return False
+    props = statement.args.get("properties")
+    if props and hasattr(props, 'expressions'):
+        for prop in props.expressions:
+            if isinstance(prop, exp.TemporaryProperty):
+                return True
+    return False
+
+
 def _find_target_table(statement: exp.Expression) -> str:
     """Extract the target table name from INSERT INTO or CREATE TABLE AS SELECT."""
     if isinstance(statement, exp.Insert):
@@ -223,6 +238,83 @@ def _parse_single_statement(
     return edges
 
 
+def _resolve_temp_views(
+    edges: list[LineageEdge],
+    temp_views: set[str],
+) -> list[LineageEdge]:
+    """Short-circuit temp views: connect their sources directly to their consumers.
+
+    Given edges: src.col -> temp.col -> target.col
+    Produces:    src.col -> target.col (with downstream transform/expression)
+    Removes all edges to/from temp views.
+    """
+    if not temp_views:
+        return edges
+
+    # Build full map of temp_view.col -> ultimate non-temp-view sources
+    # by iteratively resolving chains (step2 -> step1 -> source_table)
+    tv_sources: dict[str, list[str]] = {}
+    for e in edges:
+        tbl = e.target_col.split(".")[0] if "." in e.target_col else ""
+        if tbl in temp_views:
+            tv_sources.setdefault(e.target_col, []).append(e.source_col)
+
+    # Resolve chains: if a source in tv_sources is itself a temp view col, expand it
+    max_iterations = len(temp_views) + 1
+    for _ in range(max_iterations):
+        changed = False
+        for tv_col, sources in tv_sources.items():
+            expanded: list[str] = []
+            for src in sources:
+                src_tbl = src.split(".")[0] if "." in src else ""
+                if src_tbl in temp_views and src in tv_sources:
+                    expanded.extend(tv_sources[src])
+                    changed = True
+                else:
+                    expanded.append(src)
+            tv_sources[tv_col] = expanded
+        if not changed:
+            break
+
+    resolved: list[LineageEdge] = []
+    for e in edges:
+        src_tbl = e.source_col.split(".")[0] if "." in e.source_col else ""
+        tgt_tbl = e.target_col.split(".")[0] if "." in e.target_col else ""
+
+        if tgt_tbl in temp_views:
+            continue
+
+        if src_tbl in temp_views and e.source_col in tv_sources:
+            for upstream_col in tv_sources[e.source_col]:
+                resolved.append(LineageEdge(
+                    source_col=upstream_col,
+                    target_col=e.target_col,
+                    transform_type=e.transform_type,
+                    expression=e.expression,
+                    source_file=e.source_file,
+                    source_cell=e.source_cell,
+                    source_line=e.source_line,
+                ))
+        else:
+            resolved.append(e)
+
+    return resolved
+
+
+def _detect_temp_views(sql_text: str) -> set[str]:
+    """Parse SQL to find temp view names without extracting full lineage."""
+    try:
+        statements = sqlglot.parse(sql_text, dialect="databricks")
+    except Exception:
+        return set()
+    names = set()
+    for stmt in statements:
+        if stmt and _is_temp_view(stmt):
+            if isinstance(stmt.this, exp.Table):
+                names.add(_qualified_table_name(stmt.this))
+    return names
+
+
 _DATABRICKS_SQL_HEADER = "-- Databricks notebook source"
 _DATABRICKS_SQL_SEP = "-- COMMAND ----------"
 
@@ -257,6 +349,7 @@ def parse_sql(
     source_file: str,
     source_line: int | None,
     source_cell: int | None = None,
+    _resolve_views: bool = True,
 ) -> list[LineageEdge]:
     """Parse SQL (single or multi-statement) and return column-level lineage edges.
 
@@ -268,22 +361,30 @@ def parse_sql(
     # Detect Databricks SQL notebook format
     if _DATABRICKS_SQL_SEP in sql and source_cell is None:
         edges: list[LineageEdge] = []
+        temp_views: set[str] = set()
         for cell_sql, cell_idx in _split_databricks_sql(sql):
+            temp_views.update(_detect_temp_views(cell_sql))
             edges.extend(
-                parse_sql(cell_sql, source_file, source_line=None, source_cell=cell_idx)
+                parse_sql(cell_sql, source_file, source_line=None,
+                          source_cell=cell_idx, _resolve_views=False)
             )
-        return edges
+        return _resolve_temp_views(edges, temp_views)
 
     try:
         statements = sqlglot.parse(sql, dialect="databricks")
     except Exception:
         return []
 
+    temp_views: set[str] = set()
     edges: list[LineageEdge] = []
     for statement in statements:
         if statement is None:
             continue
+        if _is_temp_view(statement) and isinstance(statement.this, exp.Table):
+            temp_views.add(_qualified_table_name(statement.this))
         edges.extend(
             _parse_single_statement(statement, source_file, source_line, source_cell)
         )
+    if _resolve_views and temp_views:
+        return _resolve_temp_views(edges, temp_views)
     return edges

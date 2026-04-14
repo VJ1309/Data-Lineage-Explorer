@@ -137,10 +137,14 @@ GROUP BY customer_id
 """
     edges = parse_sql(sql, source_file="nb.sql", source_line=None)
     targets = {e.target_col for e in edges}
-    assert "stg.order_id" in targets
-    assert "stg.amount" in targets
+    # stg is a temp view — its edges should be resolved through
+    assert "stg.order_id" not in targets
+    assert "stg.amount" not in targets
+    # Final edges should trace back to raw_orders directly
     assert "agg_revenue.customer_id" in targets
     assert "agg_revenue.total" in targets
+    agg_edge = next(e for e in edges if e.target_col == "agg_revenue.total")
+    assert "raw_orders" in agg_edge.source_col
 
 
 def test_databricks_sql_notebook_cell_index():
@@ -170,3 +174,50 @@ SELECT x FROM src
     edges = parse_sql(sql, source_file="nb.sql", source_line=None)
     assert len(edges) == 1
     assert edges[0].source_col == "src.x"
+
+
+def test_temp_view_resolution():
+    """Temp views should be resolved through — not appear as separate tables."""
+    sql = """
+    CREATE OR REPLACE TEMP VIEW staging AS
+    SELECT order_id, amount FROM raw_orders;
+
+    INSERT INTO final_output
+    SELECT order_id, amount FROM staging;
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    # Temp view edges should be resolved away
+    assert not any("staging" in t for t in targets)
+    # Final output should trace directly to raw_orders
+    assert "final_output.order_id" in targets
+    assert "final_output.amount" in targets
+    assert "raw_orders.order_id" in sources
+    assert "raw_orders.amount" in sources
+
+
+def test_temp_view_chained():
+    """Chained temp views should resolve all the way through."""
+    sql = """-- Databricks notebook source
+-- COMMAND ----------
+CREATE OR REPLACE TEMP VIEW step1 AS
+SELECT id, val FROM source_table
+-- COMMAND ----------
+CREATE OR REPLACE TEMP VIEW step2 AS
+SELECT id, val FROM step1
+-- COMMAND ----------
+INSERT INTO final_table
+SELECT id, val FROM step2
+"""
+    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    # Both temp views should be resolved away
+    assert not any("step1" in t for t in targets)
+    assert not any("step2" in t for t in targets)
+    assert not any("step1" in s for s in sources)
+    assert not any("step2" in s for s in sources)
+    # Should trace all the way back to source_table
+    assert "final_table.id" in targets
+    assert "source_table.id" in sources

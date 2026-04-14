@@ -231,10 +231,14 @@ DATABRICKS_NOTEBOOK_MIXED_MAGIC = '''# Databricks notebook source
 def test_databricks_notebook_sql_cells():
     edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
     targets = {e.target_col for e in edges}
-    assert "stg_orders.order_id" in targets
-    assert "stg_orders.customer_id" in targets
+    # stg_orders is a temp view — its edges should be resolved through
+    assert "stg_orders.order_id" not in targets
+    assert "stg_orders.customer_id" not in targets
+    # Final targets should trace back to raw_orders directly
     assert "agg_revenue.total" in targets
     assert "agg_revenue.customer_id" in targets
+    agg_edge = next(e for e in edges if e.target_col == "agg_revenue.total")
+    assert "raw_orders" in agg_edge.source_col
 
 
 def test_databricks_notebook_pyspark_cell():
@@ -246,9 +250,7 @@ def test_databricks_notebook_pyspark_cell():
 
 def test_databricks_notebook_cell_index():
     edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
-    # SQL cell 1 (CREATE VIEW) should be cell_idx 1
-    view_edges = [e for e in edges if "stg_orders" in e.target_col]
-    assert all(e.source_cell == 1 for e in view_edges)
+    # stg_orders is a temp view, so its edges are resolved through.
     # SQL cell 2 (INSERT INTO) should be cell_idx 2
     agg_edges = [e for e in edges if "agg_revenue" in e.target_col]
     assert all(e.source_cell == 2 for e in agg_edges)

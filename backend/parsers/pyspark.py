@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from lineage.models import LineageEdge
 from parsers.sql import parse_sql as _parse_sql
+from parsers.sql import _detect_temp_views, _resolve_temp_views
 
 
 def _get_string_value(node: ast.expr) -> str | None:
@@ -73,8 +74,9 @@ def _chase_df_var(node: ast.expr) -> str | None:
 
 
 class _DataFrameTracker(ast.NodeVisitor):
-    def __init__(self, source_file: str):
+    def __init__(self, source_file: str, resolve_views: bool = True):
         self.source_file = source_file
+        self._resolve_views = resolve_views
         self.df_sources: dict[str, str] = {}   # var -> source table
         self.df_columns: dict[str, list[tuple]] = {}  # var -> [(col, transform, expr, src_cols, lineno)]
         self._join_sources: dict[str, list[str]] = {}  # var -> [table1, table2, ...]
@@ -144,6 +146,7 @@ class _DataFrameTracker(ast.NodeVisitor):
                     sql_str,
                     source_file=self.source_file,
                     source_line=node.lineno,
+                    _resolve_views=self._resolve_views,
                 )
                 self.edges.extend(sql_edges)
                 self.generic_visit(node)
@@ -286,6 +289,7 @@ class _DataFrameTracker(ast.NodeVisitor):
                 sql_str,
                 source_file=self.source_file,
                 source_line=node.lineno,
+                _resolve_views=self._resolve_views,
             )
             self.edges.extend(sql_edges)
             self.generic_visit(node)
@@ -350,6 +354,7 @@ _SQL_MAGICS = ("%sql", "%sql ")
 def _parse_databricks_py(code: str, source_file: str) -> list[LineageEdge]:
     """Parse a Databricks-exported .py notebook with # COMMAND and # MAGIC markers."""
     edges: list[LineageEdge] = []
+    temp_views: set[str] = set()
     cells = code.split(_COMMAND_SEP)
 
     for cell_idx, cell in enumerate(cells):
@@ -383,11 +388,13 @@ def _parse_databricks_py(code: str, source_file: str) -> list[LineageEdge]:
 
             if is_sql and content_lines:
                 sql = "\n".join(content_lines)
+                temp_views.update(_detect_temp_views(sql))
                 sql_edges = _parse_sql(
                     sql,
                     source_file=source_file,
                     source_line=None,
                     source_cell=cell_idx,
+                    _resolve_views=False,
                 )
                 edges.extend(sql_edges)
         else:
@@ -396,16 +403,20 @@ def _parse_databricks_py(code: str, source_file: str) -> list[LineageEdge]:
             py_lines = [l for l in lines if not l.startswith("# Databricks")]
             py_code = "\n".join(py_lines).strip()
             if py_code:
-                cell_edges = parse_pyspark(py_code, source_file=source_file, source_cell=cell_idx)
+                cell_edges = parse_pyspark(
+                    py_code, source_file=source_file,
+                    source_cell=cell_idx, _resolve_views=False,
+                )
                 edges.extend(cell_edges)
 
-    return edges
+    return _resolve_temp_views(edges, temp_views)
 
 
 def parse_pyspark(
     code: str,
     source_file: str,
     source_cell: int | None = None,
+    _resolve_views: bool = True,
 ) -> list[LineageEdge]:
     """Parse PySpark Python code and return column-level lineage edges.
 
@@ -422,7 +433,7 @@ def parse_pyspark(
     except SyntaxError:
         return []
 
-    tracker = _DataFrameTracker(source_file=source_file)
+    tracker = _DataFrameTracker(source_file=source_file, resolve_views=False)
     tracker.visit(tree)
 
     if source_cell is not None:
