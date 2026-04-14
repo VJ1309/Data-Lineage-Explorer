@@ -184,3 +184,91 @@ def test_spark_sql_source_line():
     edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
     for edge in edges:
         assert edge.source_line is not None
+
+
+DATABRICKS_NOTEBOOK = '''# Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC CREATE OR REPLACE TEMP VIEW stg_orders AS (
+# MAGIC   SELECT order_id, customer_id, amount
+# MAGIC   FROM raw_orders
+# MAGIC )
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC INSERT INTO agg_revenue
+# MAGIC SELECT customer_id, SUM(amount) AS total
+# MAGIC FROM stg_orders
+# MAGIC GROUP BY customer_id
+
+# COMMAND ----------
+
+df = spark.read.table("enrichment")
+result = df.select("id", "value")
+result.write.saveAsTable("final_output")
+'''
+
+DATABRICKS_NOTEBOOK_MIXED_MAGIC = '''# Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # This is a markdown cell - should be skipped
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT col_a, col_b FROM src_table
+
+# COMMAND ----------
+
+# MAGIC %python
+# MAGIC print("this is python magic - should be skipped")
+'''
+
+
+def test_databricks_notebook_sql_cells():
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    targets = {e.target_col for e in edges}
+    assert "stg_orders.order_id" in targets
+    assert "stg_orders.customer_id" in targets
+    assert "agg_revenue.total" in targets
+    assert "agg_revenue.customer_id" in targets
+
+
+def test_databricks_notebook_pyspark_cell():
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    targets = {e.target_col for e in edges}
+    assert "final_output.id" in targets
+    assert "final_output.value" in targets
+
+
+def test_databricks_notebook_cell_index():
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    # SQL cell 1 (CREATE VIEW) should be cell_idx 1
+    view_edges = [e for e in edges if "stg_orders" in e.target_col]
+    assert all(e.source_cell == 1 for e in view_edges)
+    # SQL cell 2 (INSERT INTO) should be cell_idx 2
+    agg_edges = [e for e in edges if "agg_revenue" in e.target_col]
+    assert all(e.source_cell == 2 for e in agg_edges)
+    # PySpark cell should be cell_idx 3
+    py_edges = [e for e in edges if "final_output" in e.target_col]
+    assert all(e.source_cell == 3 for e in py_edges)
+
+
+def test_databricks_notebook_skips_markdown():
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK_MIXED_MAGIC, source_file="nb.py")
+    # Only the %sql cell should produce edges
+    targets = {e.target_col for e in edges}
+    assert "result.col_a" in targets
+    assert "result.col_b" in targets
+    assert len(edges) == 2
+
+
+def test_regular_python_not_treated_as_databricks():
+    """Files without the Databricks header should parse normally."""
+    code = 'df = spark.read.table("t1")\ndf.write.saveAsTable("t2")'
+    edges = parse_pyspark(code, source_file="regular.py")
+    # Should not crash or misbehave
+    assert isinstance(edges, list)

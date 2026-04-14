@@ -341,12 +341,82 @@ class _DataFrameTracker(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+_DATABRICKS_HEADER = "# Databricks notebook source"
+_COMMAND_SEP = "# COMMAND ----------"
+_MAGIC_PREFIX = "# MAGIC "
+_SQL_MAGICS = ("%sql", "%sql ")
+
+
+def _parse_databricks_py(code: str, source_file: str) -> list[LineageEdge]:
+    """Parse a Databricks-exported .py notebook with # COMMAND and # MAGIC markers."""
+    edges: list[LineageEdge] = []
+    cells = code.split(_COMMAND_SEP)
+
+    for cell_idx, cell in enumerate(cells):
+        lines = cell.strip().splitlines()
+        if not lines:
+            continue
+
+        # Check if this cell uses %sql magic
+        magic_lines = [l for l in lines if l.startswith(_MAGIC_PREFIX)]
+        if magic_lines:
+            # Extract content after # MAGIC prefix
+            content_lines = []
+            is_sql = False
+            for line in magic_lines:
+                content = line[len(_MAGIC_PREFIX):]
+                if any(content.startswith(m) for m in _SQL_MAGICS):
+                    is_sql = True
+                    # Strip the %sql prefix from first line
+                    content = content.lstrip()
+                    for m in _SQL_MAGICS:
+                        if content.startswith(m):
+                            content = content[len(m):].strip()
+                            break
+                    if content:
+                        content_lines.append(content)
+                elif content.startswith("%"):
+                    # Other magic (%python, %md, %run) — skip
+                    break
+                else:
+                    content_lines.append(content)
+
+            if is_sql and content_lines:
+                sql = "\n".join(content_lines)
+                sql_edges = _parse_sql(
+                    sql,
+                    source_file=source_file,
+                    source_line=None,
+                    source_cell=cell_idx,
+                )
+                edges.extend(sql_edges)
+        else:
+            # Pure Python cell — strip any non-MAGIC comment-only preamble
+            # (like the header line) and parse as PySpark
+            py_lines = [l for l in lines if not l.startswith("# Databricks")]
+            py_code = "\n".join(py_lines).strip()
+            if py_code:
+                cell_edges = parse_pyspark(py_code, source_file=source_file, source_cell=cell_idx)
+                edges.extend(cell_edges)
+
+    return edges
+
+
 def parse_pyspark(
     code: str,
     source_file: str,
     source_cell: int | None = None,
 ) -> list[LineageEdge]:
-    """Parse PySpark Python code and return column-level lineage edges."""
+    """Parse PySpark Python code and return column-level lineage edges.
+
+    Automatically detects Databricks-exported .py notebooks
+    (files starting with '# Databricks notebook source') and
+    routes them through the Databricks notebook parser.
+    """
+    # Detect Databricks exported notebook format
+    if code.lstrip().startswith(_DATABRICKS_HEADER) and source_cell is None:
+        return _parse_databricks_py(code, source_file)
+
     try:
         tree = ast.parse(code)
     except SyntaxError:
