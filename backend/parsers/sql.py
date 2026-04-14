@@ -58,6 +58,17 @@ def _find_select(statement: exp.Expression) -> exp.Select | None:
     return statement.find(exp.Select)
 
 
+def _find_target_table(statement: exp.Expression) -> str:
+    """Extract the target table name from INSERT INTO or CREATE TABLE AS SELECT."""
+    if isinstance(statement, exp.Insert):
+        if isinstance(statement.this, exp.Table):
+            return statement.this.name
+    elif isinstance(statement, exp.Create):
+        if isinstance(statement.this, exp.Table):
+            return statement.this.name
+    return "result"
+
+
 def parse_sql(
     sql: str,
     source_file: str,
@@ -82,6 +93,7 @@ def parse_sql(
         return []
 
     cte_map = _resolve_ctes(statement)
+    target_table = _find_target_table(statement)
     edges: list[LineageEdge] = []
 
     # Collect source tables from FROM + JOINs
@@ -122,7 +134,7 @@ def parse_sql(
         if not alias:
             continue
 
-        target_col = f"result.{alias}"
+        target_col = f"{target_table}.{alias}"
         transform_type, expr_str = _classify_transform(expr_node)
 
         # For window functions, extract actual column refs from the window expression
