@@ -149,9 +149,9 @@ export default function CatalogPage() {
                 <thead>
                   <tr className="border-b text-xs text-muted-foreground uppercase tracking-wide">
                     <th className="text-left py-2 px-3 font-medium">Column</th>
-                    <th className="text-left py-2 px-3 font-medium">Source</th>
+                    <th className="text-left py-2 px-3 font-medium">Source Table</th>
                     <th className="text-left py-2 px-3 font-medium">Transform</th>
-                    <th className="text-left py-2 px-3 font-medium">File</th>
+                    <th className="text-left py-2 px-3 font-medium">Defined In</th>
                     <th className="py-2 px-3"></th>
                   </tr>
                 </thead>
@@ -159,16 +159,24 @@ export default function CatalogPage() {
                   {columns.map((col) => (
                     <tr key={col.id} className="border-b hover:bg-muted/40 transition-colors">
                       <td className="py-2 px-3 font-medium">{col.column}</td>
-                      <td className="py-2 px-3 text-muted-foreground text-xs">
-                        {col.source_file ?? "—"}
-                        {col.source_line != null ? `:${col.source_line}` : ""}
-                        {col.source_cell != null ? ` cell ${col.source_cell}` : ""}
+                      <td className="py-2 px-3 text-xs">
+                        {col.source_tables.length > 0
+                          ? col.source_tables.map((st, i) => (
+                              <span key={st}>
+                                {i > 0 && <span className="text-muted-foreground">, </span>}
+                                <span className="text-blue-600 dark:text-blue-400">{st}</span>
+                              </span>
+                            ))
+                          : <span className="text-muted-foreground">—</span>
+                        }
                       </td>
                       <td className="py-2 px-3">
                         <TransformBadge type={col.transform_type} />
                       </td>
-                      <td className="py-2 px-3 text-xs text-muted-foreground truncate max-w-[160px]">
+                      <td className="py-2 px-3 text-xs text-muted-foreground truncate max-w-[200px]">
                         {col.source_file ?? "—"}
+                        {col.source_cell != null ? ` (cell ${col.source_cell})` : ""}
+                        {col.source_line != null ? `:${col.source_line}` : ""}
                       </td>
                       <td className="py-2 px-3">
                         <Button

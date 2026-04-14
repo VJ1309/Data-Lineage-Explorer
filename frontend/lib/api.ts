@@ -29,6 +29,7 @@ export type ColumnMeta = {
   id: string;
   table: string;
   column: string;
+  source_tables: string[];
   source_file: string | null;
   source_cell: number | null;
   source_line: number | null;

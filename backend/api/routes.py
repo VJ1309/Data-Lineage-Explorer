@@ -242,12 +242,20 @@ def list_columns(table: str):
             if t == table:
                 preds = list(state.lineage_graph.predecessors(node))
                 edge_data = None
+                source_tables: list[str] = []
                 if preds:
                     edge_data = state.lineage_graph.edges[preds[0], node].get("data")
+                    # Collect all distinct source tables for this column
+                    for pred in preds:
+                        if "." in pred:
+                            st = pred.rsplit(".", 1)[0]
+                            if st not in source_tables:
+                                source_tables.append(st)
                 cols.append({
                     "id": node,
                     "table": t,
                     "column": col,
+                    "source_tables": source_tables,
                     "source_file": edge_data.source_file if edge_data else None,
                     "source_cell": edge_data.source_cell if edge_data else None,
                     "source_line": edge_data.source_line if edge_data else None,
