@@ -122,3 +122,51 @@ def test_catalog_schema_table():
     edges = parse_sql(sql, source_file="q.sql", source_line=1)
     sources = {e.source_col for e in edges}
     assert "my_catalog.my_schema.my_table.col1" in sources
+
+
+def test_databricks_sql_notebook():
+    sql = """-- Databricks notebook source
+-- COMMAND ----------
+CREATE OR REPLACE TEMP VIEW stg AS
+SELECT order_id, amount FROM raw_orders
+-- COMMAND ----------
+INSERT INTO agg_revenue
+SELECT customer_id, SUM(amount) AS total
+FROM stg
+GROUP BY customer_id
+"""
+    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    targets = {e.target_col for e in edges}
+    assert "stg.order_id" in targets
+    assert "stg.amount" in targets
+    assert "agg_revenue.customer_id" in targets
+    assert "agg_revenue.total" in targets
+
+
+def test_databricks_sql_notebook_cell_index():
+    sql = """-- Databricks notebook source
+-- COMMAND ----------
+SELECT a FROM t1
+-- COMMAND ----------
+-- just a comment
+-- COMMAND ----------
+SELECT b FROM t2
+"""
+    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    t1_edges = [e for e in edges if "t1" in e.source_col]
+    t2_edges = [e for e in edges if "t2" in e.source_col]
+    assert all(e.source_cell == 1 for e in t1_edges)
+    assert all(e.source_cell == 3 for e in t2_edges)
+
+
+def test_databricks_sql_notebook_skips_comment_cells():
+    sql = """-- Databricks notebook source
+-- COMMAND ----------
+-- This is a comment-only cell
+-- Another comment
+-- COMMAND ----------
+SELECT x FROM src
+"""
+    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    assert len(edges) == 1
+    assert edges[0].source_col == "src.x"

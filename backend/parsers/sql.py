@@ -223,6 +223,35 @@ def _parse_single_statement(
     return edges
 
 
+_DATABRICKS_SQL_HEADER = "-- Databricks notebook source"
+_DATABRICKS_SQL_SEP = "-- COMMAND ----------"
+
+
+def _split_databricks_sql(sql: str) -> list[tuple[str, int]]:
+    """Split a Databricks-exported .sql notebook into (cell_sql, cell_index) pairs."""
+    cells: list[tuple[str, int]] = []
+    cell_idx = 0
+    for chunk in sql.split(_DATABRICKS_SQL_SEP):
+        # Strip the header comment and whitespace
+        cleaned = chunk.strip()
+        if cleaned == _DATABRICKS_SQL_HEADER.strip():
+            cell_idx += 1
+            continue
+        # Remove leading header if present
+        if cleaned.startswith(_DATABRICKS_SQL_HEADER):
+            cleaned = cleaned[len(_DATABRICKS_SQL_HEADER):].strip()
+        if cleaned and not cleaned.startswith("--") or "\n" in cleaned:
+            # Filter out cells that are only comments (like %md magic)
+            non_comment_lines = [
+                l for l in cleaned.splitlines()
+                if l.strip() and not l.strip().startswith("--")
+            ]
+            if non_comment_lines:
+                cells.append((cleaned, cell_idx))
+        cell_idx += 1
+    return cells
+
+
 def parse_sql(
     sql: str,
     source_file: str,
@@ -232,9 +261,19 @@ def parse_sql(
     """Parse SQL (single or multi-statement) and return column-level lineage edges.
 
     Supports multiple statements separated by semicolons.
+    Detects Databricks-exported .sql notebooks and splits on '-- COMMAND ----------'.
     Uses "result" as the synthetic target table name when no INTO/CREATE is present.
     Returns empty list on parse error (non-fatal).
     """
+    # Detect Databricks SQL notebook format
+    if _DATABRICKS_SQL_SEP in sql and source_cell is None:
+        edges: list[LineageEdge] = []
+        for cell_sql, cell_idx in _split_databricks_sql(sql):
+            edges.extend(
+                parse_sql(cell_sql, source_file, source_line=None, source_cell=cell_idx)
+            )
+        return edges
+
     try:
         statements = sqlglot.parse(sql, dialect="databricks")
     except Exception:
