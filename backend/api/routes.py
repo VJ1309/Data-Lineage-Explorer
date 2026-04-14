@@ -207,7 +207,30 @@ def list_tables():
         if "." in node:
             table, _ = node.rsplit(".", 1)
             tables[table] = tables.get(table, 0) + 1
-    return [{"table": t, "column_count": c} for t, c in sorted(tables.items())]
+
+    # Classify each table's role based on edge directions
+    target_tables: set[str] = set()  # tables written to (appear as edge target)
+    source_tables: set[str] = set()  # tables read from (appear as edge source)
+    for u, v, data in state.lineage_graph.edges(data=True):
+        if "." in u:
+            source_tables.add(u.rsplit(".", 1)[0])
+        if "." in v:
+            target_tables.add(v.rsplit(".", 1)[0])
+
+    result = []
+    for t, c in sorted(tables.items()):
+        is_target = t in target_tables
+        is_source = t in source_tables
+        if t == "result":
+            role = "result"
+        elif is_target and is_source:
+            role = "intermediate"   # both read and written
+        elif is_target:
+            role = "target"         # only written to (final output)
+        else:
+            role = "source"         # only read from (external source)
+        result.append({"table": t, "column_count": c, "role": role})
+    return result
 
 
 @router.get("/tables/{table}/columns")

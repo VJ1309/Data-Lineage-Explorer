@@ -22,6 +22,7 @@ export type Source = {
 export type TableSummary = {
   table: string;
   column_count: number;
+  role: "source" | "target" | "intermediate" | "result";
 };
 
 export type ColumnMeta = {

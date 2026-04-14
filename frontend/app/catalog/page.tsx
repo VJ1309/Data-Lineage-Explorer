@@ -5,6 +5,49 @@ import { useTables, useColumns } from "@/lib/hooks";
 import { TransformBadge } from "@/components/transform-badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import type { TableSummary } from "@/lib/api";
+
+const ROLE_CONFIG: Record<string, { label: string; description: string; color: string }> = {
+  target: {
+    label: "Target Tables",
+    description: "Final output tables — written to but not read from within these files",
+    color: "text-green-600 dark:text-green-400",
+  },
+  intermediate: {
+    label: "Intermediate Tables",
+    description: "Both read from and written to — staging or transformation tables",
+    color: "text-amber-600 dark:text-amber-400",
+  },
+  source: {
+    label: "Source Tables",
+    description: "External source tables — read from but not created in these files",
+    color: "text-blue-600 dark:text-blue-400",
+  },
+  result: {
+    label: "Ungrouped Queries",
+    description: "Standalone SELECT queries with no INSERT INTO target",
+    color: "text-muted-foreground",
+  },
+};
+
+const ROLE_ORDER = ["target", "intermediate", "source", "result"];
+
+const ROLE_DOT: Record<string, string> = {
+  target: "bg-green-500",
+  intermediate: "bg-amber-500",
+  source: "bg-blue-500",
+  result: "bg-gray-400",
+};
+
+function groupByRole(tables: TableSummary[]): Record<string, TableSummary[]> {
+  const groups: Record<string, TableSummary[]> = {};
+  for (const t of tables) {
+    const role = t.role || "source";
+    if (!groups[role]) groups[role] = [];
+    groups[role].push(t);
+  }
+  return groups;
+}
 
 export default function CatalogPage() {
   const router = useRouter();
@@ -17,10 +60,15 @@ export default function CatalogPage() {
     t.table.toLowerCase().includes(search.toLowerCase())
   ) ?? [];
 
+  const grouped = groupByRole(filtered);
+
+  // Find the role of the selected table for display
+  const selectedRole = tables?.find((t) => t.table === selectedTable)?.role;
+
   return (
     <div className="flex gap-6 h-[calc(100vh-120px)]">
       {/* Sidebar */}
-      <div className="w-56 flex-shrink-0 space-y-2">
+      <div className="w-64 flex-shrink-0 space-y-2">
         <Input
           placeholder="Search tables…"
           value={search}
@@ -30,32 +78,71 @@ export default function CatalogPage() {
         <div className="text-xs text-muted-foreground uppercase tracking-wide px-1">
           {isLoading ? "Loading…" : `${filtered.length} tables`}
         </div>
-        <div className="space-y-0.5 overflow-y-auto max-h-[calc(100vh-200px)]">
-          {filtered.map((t) => (
-            <button
-              key={t.table}
-              onClick={() => setSelectedTable(t.table)}
-              className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors ${
-                selectedTable === t.table
-                  ? "bg-accent text-accent-foreground font-medium"
-                  : "hover:bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {t.table}
-              <span className="ml-1 text-xs text-muted-foreground">({t.column_count})</span>
-            </button>
-          ))}
+        <div className="space-y-3 overflow-y-auto max-h-[calc(100vh-200px)]">
+          {ROLE_ORDER.map((role) => {
+            const group = grouped[role];
+            if (!group || group.length === 0) return null;
+            const config = ROLE_CONFIG[role];
+            return (
+              <div key={role}>
+                <div className={`px-2 py-1 text-xs font-semibold uppercase tracking-wider ${config.color}`}>
+                  {config.label} ({group.length})
+                </div>
+                <div className="space-y-0.5 mt-0.5">
+                  {group.map((t) => (
+                    <button
+                      key={t.table}
+                      onClick={() => setSelectedTable(t.table)}
+                      className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors flex items-center gap-2 ${
+                        selectedTable === t.table
+                          ? "bg-accent text-accent-foreground font-medium"
+                          : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${ROLE_DOT[role]}`} />
+                      <span className="truncate">{t.table}</span>
+                      <span className="ml-auto text-xs text-muted-foreground flex-shrink-0">
+                        {t.column_count}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
       {/* Main panel */}
       <div className="flex-1 overflow-auto">
         {!selectedTable && (
-          <p className="text-sm text-muted-foreground mt-4">Select a table to view its columns.</p>
+          <div className="mt-4 space-y-4">
+            <p className="text-sm text-muted-foreground">Select a table to view its columns and lineage.</p>
+            {/* Summary cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {ROLE_ORDER.map((role) => {
+                const count = grouped[role]?.length ?? 0;
+                const config = ROLE_CONFIG[role];
+                return (
+                  <div key={role} className="border rounded-lg p-3">
+                    <div className={`text-2xl font-bold ${config.color}`}>{count}</div>
+                    <div className="text-xs font-medium mt-1">{config.label}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{config.description}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
         {selectedTable && (
           <>
-            <h2 className="text-lg font-semibold mb-4">{selectedTable}</h2>
+            <div className="flex items-center gap-3 mb-4">
+              <span className={`w-2.5 h-2.5 rounded-full ${ROLE_DOT[selectedRole || "source"]}`} />
+              <h2 className="text-lg font-semibold">{selectedTable}</h2>
+              <span className={`text-xs font-medium uppercase ${ROLE_CONFIG[selectedRole || "source"]?.color}`}>
+                {selectedRole}
+              </span>
+            </div>
             {colsLoading && <p className="text-sm text-muted-foreground">Loading columns…</p>}
             {columns && (
               <table className="w-full text-sm border-collapse">
@@ -89,7 +176,7 @@ export default function CatalogPage() {
                           variant="ghost"
                           className="text-xs h-6 px-2"
                           onClick={() =>
-                            router.push(`/lineage?table=${selectedTable}&column=${col.column}`)
+                            router.push(`/lineage?table=${encodeURIComponent(selectedTable)}&column=${encodeURIComponent(col.column)}`)
                           }
                         >
                           View Lineage →
