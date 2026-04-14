@@ -34,7 +34,19 @@
       "Bash(git -c user.email=varun@datalineage.local -c user.name=Varun commit -m ':*)",
       "Bash(git -c user.email=\"varun@datalineage.local\" -c user.name=\"Varun\" commit -m \"feat: add PySpark AST parser\")",
       "Bash(git -c user.email=\"varun@datalineage.local\" -c user.name=\"Varun\" commit -m \"feat: add ZIP upload ingestion\")",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(pip show:*)",
+      "Bash(sed -n '61,75p' parsers/sql.py)",
+      "Bash(sed -n '218,235p' parsers/pyspark.py)",
+      "Bash(/d/Python/ClaudeCode/.venv/Scripts/pip3.exe install:*)",
+      "Bash(/d/Python/ClaudeCode/.venv/Scripts/python.exe -m pytest tests/test_engine.py -v)",
+      "Bash(/d/Python/ClaudeCode/.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(npx create-next-app@latest frontend --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(npm install:*)",
+      "Bash(npx shadcn@latest init --defaults)",
+      "Bash(npx shadcn@latest add badge tabs card input label separator --yes)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)"
     ]
   }
 }
