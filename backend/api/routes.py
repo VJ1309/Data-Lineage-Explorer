@@ -205,7 +205,7 @@ def list_tables():
     tables: dict[str, int] = {}
     for node in state.lineage_graph.nodes():
         if "." in node:
-            table, _ = node.split(".", 1)
+            table, _ = node.rsplit(".", 1)
             tables[table] = tables.get(table, 0) + 1
     return [{"table": t, "column_count": c} for t, c in sorted(tables.items())]
 
@@ -215,7 +215,7 @@ def list_columns(table: str):
     cols = []
     for node in state.lineage_graph.nodes():
         if "." in node:
-            t, col = node.split(".", 1)
+            t, col = node.rsplit(".", 1)
             if t == table:
                 preds = list(state.lineage_graph.predecessors(node))
                 edge_data = None
@@ -269,7 +269,7 @@ def search(q: str):
     results = []
     for node in state.lineage_graph.nodes():
         if q_lower in node.lower() and "." in node:
-            table, col = node.split(".", 1)
+            table, col = node.rsplit(".", 1)
             results.append({"id": node, "table": table, "column": col})
     return results
 

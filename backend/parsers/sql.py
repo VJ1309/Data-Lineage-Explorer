@@ -255,7 +255,7 @@ def _resolve_temp_views(
     # by iteratively resolving chains (step2 -> step1 -> source_table)
     tv_sources: dict[str, list[str]] = {}
     for e in edges:
-        tbl = e.target_col.split(".")[0] if "." in e.target_col else ""
+        tbl = e.target_col.rsplit(".", 1)[0] if "." in e.target_col else ""
         if tbl in temp_views:
             tv_sources.setdefault(e.target_col, []).append(e.source_col)
 
@@ -266,7 +266,7 @@ def _resolve_temp_views(
         for tv_col, sources in tv_sources.items():
             expanded: list[str] = []
             for src in sources:
-                src_tbl = src.split(".")[0] if "." in src else ""
+                src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
                 if src_tbl in temp_views and src in tv_sources:
                     expanded.extend(tv_sources[src])
                     changed = True
@@ -278,8 +278,8 @@ def _resolve_temp_views(
 
     resolved: list[LineageEdge] = []
     for e in edges:
-        src_tbl = e.source_col.split(".")[0] if "." in e.source_col else ""
-        tgt_tbl = e.target_col.split(".")[0] if "." in e.target_col else ""
+        src_tbl = e.source_col.rsplit(".", 1)[0] if "." in e.source_col else ""
+        tgt_tbl = e.target_col.rsplit(".", 1)[0] if "." in e.target_col else ""
 
         if tgt_tbl in temp_views:
             continue
