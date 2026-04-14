@@ -27,6 +27,75 @@ def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarnin
     return edges, warnings
 
 
+def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
+    """Normalize edge identifiers: lowercase + resolve short table names to full form.
+
+    In Databricks/Unity Catalog, the same table can be referenced as:
+      - catalog.schema.table  (full 3-part name)
+      - schema.table          (2-part, when catalog is implicit)
+      - table                 (1-part, when both are implicit)
+    This merges them to the longest known form.
+    """
+    # Step 1: Collect all unique table names (lowercased)
+    table_names: set[str] = set()
+    for e in edges:
+        src = e.source_col.lower()
+        tgt = e.target_col.lower()
+        if "." in src:
+            table_names.add(src.rsplit(".", 1)[0])
+        if "." in tgt:
+            table_names.add(tgt.rsplit(".", 1)[0])
+
+    # Step 2: Build a mapping from short names to their longest matching form
+    # e.g., "delv.cst_tpt_trn" -> "uc_dc_delv.delv.cst_tpt_trn"
+    short_to_long: dict[str, str] = {}
+    sorted_names = sorted(table_names, key=lambda n: n.count("."), reverse=True)
+    for name in sorted_names:
+        for longer in sorted_names:
+            if longer == name:
+                continue
+            # Check if 'name' is a suffix of 'longer' at a dot boundary
+            if longer.endswith("." + name):
+                short_to_long[name] = short_to_long.get(longer, longer)
+                break
+
+    if not short_to_long:
+        # Only case normalization needed
+        normalized = []
+        for e in edges:
+            normalized.append(LineageEdge(
+                source_col=e.source_col.lower(),
+                target_col=e.target_col.lower(),
+                transform_type=e.transform_type,
+                expression=e.expression,
+                source_file=e.source_file,
+                source_cell=e.source_cell,
+                source_line=e.source_line,
+            ))
+        return normalized
+
+    def _resolve_col(col_id: str) -> str:
+        col_lower = col_id.lower()
+        if "." not in col_lower:
+            return col_lower
+        table, col = col_lower.rsplit(".", 1)
+        resolved = short_to_long.get(table, table)
+        return f"{resolved}.{col}"
+
+    normalized = []
+    for e in edges:
+        normalized.append(LineageEdge(
+            source_col=_resolve_col(e.source_col),
+            target_col=_resolve_col(e.target_col),
+            transform_type=e.transform_type,
+            expression=e.expression,
+            source_file=e.source_file,
+            source_cell=e.source_cell,
+            source_line=e.source_line,
+        ))
+    return normalized
+
+
 def build_graph_with_warnings(
     records: list[FileRecord],
 ) -> tuple[nx.DiGraph, list[ParseWarning]]:
@@ -34,11 +103,17 @@ def build_graph_with_warnings(
     graph: nx.DiGraph = nx.DiGraph()
     all_warnings: list[ParseWarning] = []
 
+    all_edges: list[LineageEdge] = []
     for record in records:
         edges, warnings = _parse_file(record)
         all_warnings.extend(warnings)
-        for edge in edges:
-            graph.add_edge(edge.source_col, edge.target_col, data=edge)
+        all_edges.extend(edges)
+
+    # Normalize identifiers: lowercase + resolve short table names
+    all_edges = _normalize_edges(all_edges)
+
+    for edge in all_edges:
+        graph.add_edge(edge.source_col, edge.target_col, data=edge)
 
     # Detect cycles and warn
     if not nx.is_directed_acyclic_graph(graph):
