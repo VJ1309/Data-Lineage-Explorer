@@ -5,7 +5,7 @@ import { useTables, useColumns } from "@/lib/hooks";
 import { TransformBadge } from "@/components/transform-badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import type { TableSummary } from "@/lib/api";
+import type { TableSummary, ColumnMeta } from "@/lib/api";
 
 const ROLE_CONFIG: Record<string, { label: string; description: string; color: string }> = {
   target: {
@@ -49,7 +49,7 @@ function groupByRole(tables: TableSummary[]): Record<string, TableSummary[]> {
   return groups;
 }
 
-function ColumnRow({ col, onLineage }: { col: import("@/lib/api").ColumnMeta; onLineage: () => void }) {
+function ColumnRow({ col, onLineage }: { col: ColumnMeta; onLineage: () => void }) {
   const [open, setOpen] = useState(false);
   const hasExpr = !!col.expression;
 
