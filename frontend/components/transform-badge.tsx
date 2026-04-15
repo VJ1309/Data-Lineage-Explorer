@@ -11,14 +11,35 @@ const COLOURS: Record<string, string> = {
   filter:      "bg-rose-100 text-rose-800 border-rose-200",
 };
 
+const LABELS: Record<string, string> = {
+  passthrough: "Passthrough",
+  aggregation: "Aggregation",
+  expression:  "Expression",
+  join_key:    "Join Key",
+  window:      "Window",
+  cast:        "Cast",
+  filter:      "Filter",
+};
+
+const DESCRIPTIONS: Record<string, string> = {
+  passthrough: "Column is copied directly from source with no transformation (may be renamed)",
+  aggregation: "Column is computed by an aggregate function: SUM, COUNT, AVG, MAX, MIN, etc.",
+  expression:  "Column is derived via arithmetic (+, -, *, /), CASE WHEN, IF, or COALESCE",
+  join_key:    "Column is used as a join key between tables",
+  window:      "Column is computed by a window function using OVER (PARTITION BY ...)",
+  cast:        "Column value is type-cast to a different data type via CAST(...)",
+  filter:      "Column is used as a filter condition (WHERE / HAVING)",
+};
+
 export function TransformBadge({ type }: { type: string | null }) {
   if (!type) return null;
   return (
     <Badge
       variant="outline"
-      className={cn("text-xs font-medium", COLOURS[type] ?? "bg-muted text-muted-foreground")}
+      title={DESCRIPTIONS[type]}
+      className={cn("text-xs font-medium cursor-help", COLOURS[type] ?? "bg-muted text-muted-foreground")}
     >
-      {type}
+      {LABELS[type] ?? type}
     </Badge>
   );
 }
