@@ -221,3 +221,54 @@ SELECT id, val FROM step2
     # Should trace all the way back to source_table
     assert "final_table.id" in targets
     assert "source_table.id" in sources
+
+
+def test_struct_field_access_no_phantom_table():
+    """Struct field access (struct_col.field) must not create a phantom table.
+
+    When a column like `info.city` is referenced where `info` is a struct column
+    on `customers` (not a table alias), SQLGlot parses it as Column(table='info',
+    name='city').  The parser must fall back to the real source table instead of
+    registering 'info' as a phantom table.
+    """
+    sql = """
+    INSERT INTO summary
+    SELECT info.city AS city, score
+    FROM customers
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    # 'info' is a struct column on customers — must NOT appear as a table
+    assert not any(s.startswith("info.") for s in sources), (
+        f"Phantom table 'info' found in sources: {sources}"
+    )
+    # Both columns should be attributed to the real source table
+    assert any("customers" in s for s in sources)
+
+
+def test_multi_table_cte_no_phantom_table():
+    """CTE that joins multiple tables must not create a phantom table.
+
+    _resolve_ctes only handles single-table CTEs.  When a CTE joins two tables,
+    the alias is absent from cte_map, so _resolve_table_hint used to return the
+    raw alias string, creating a phantom node.  The parser must fall back to the
+    first real source table instead.
+    """
+    sql = """
+    WITH joined AS (
+        SELECT a.id, b.val
+        FROM table_a a
+        JOIN table_b b ON a.id = b.id
+    )
+    INSERT INTO final_table
+    SELECT id, val FROM joined
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # 'joined' must NOT appear as a phantom table
+    assert not any(s.startswith("joined.") for s in sources), (
+        f"Phantom table 'joined' found in sources: {sources}"
+    )
+    assert "final_table.id" in targets
+    assert "final_table.val" in targets

@@ -143,12 +143,23 @@ def _parse_single_statement(
     default_table = source_tables[0] if source_tables else "unknown"
 
     def _resolve_table_hint(hint: str) -> str:
-        """Resolve a table alias/name through alias_map, then cte_map."""
+        """Resolve a table alias/name through alias_map, then cte_map, then source_tables.
+
+        Falls back to default_table for unrecognized hints — e.g. struct field
+        accesses that SQLGlot parses as Column(table=hint, name=field), or CTE
+        aliases that _resolve_ctes couldn't map (multi-table CTEs).
+        """
         if hint in alias_map:
             return alias_map[hint]
         if hint in cte_map:
             return cte_map[hint]
-        return hint
+        # Direct or unqualified-suffix match against known source tables
+        for tbl in source_tables:
+            if tbl == hint or tbl.endswith(f".{hint}"):
+                return tbl
+        # Unrecognized hint — fall back to default source table rather than
+        # creating a phantom table node in the lineage graph.
+        return default_table
 
     # Walk SELECT expressions
     for sel in select_node.selects:
