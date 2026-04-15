@@ -52,7 +52,7 @@ function LineageContent() {
         </TabsContent>
 
         <TabsContent value="tree" className="pt-4">
-          <LineageTree targetColId={data.target} edges={data.upstream} />
+          <LineageTree targetColId={data.target} upstream={data.upstream} downstream={data.downstream} />
         </TabsContent>
 
         <TabsContent value="code" className="pt-4">
