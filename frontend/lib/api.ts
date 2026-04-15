@@ -34,6 +34,7 @@ export type ColumnMeta = {
   source_cell: number | null;
   source_line: number | null;
   transform_type: string | null;
+  expression: string | null;
 };
 
 export type LineageEdge = {
