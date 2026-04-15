@@ -23,6 +23,7 @@ def _edge_to_dict(edge) -> dict:
         "source_file": edge.source_file,
         "source_cell": edge.source_cell,
         "source_line": edge.source_line,
+        "confidence": edge.confidence,
     }
 
 

@@ -169,3 +169,44 @@ def test_token_not_in_source_response():
     resp = client.get("/sources")
     sources_str = str(resp.json())
     assert "secret-token-123" not in sources_str
+
+
+def test_lineage_edge_has_confidence_field():
+    """Every edge returned by /lineage must include a confidence field."""
+    zip_bytes = _make_zip({
+        "query.sql": "SELECT SUM(amount) AS total FROM raw_orders"
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/lineage", params={"table": "result", "column": "total"})
+    assert resp.status_code == 200
+    data = resp.json()
+    for edge in data["upstream"] + data["downstream"] + data["graph"]["edges"]:
+        assert "confidence" in edge, f"Edge missing confidence: {edge}"
+        assert edge["confidence"] in ("certain", "approximate")
+
+
+def test_approximate_edge_for_struct_field():
+    """Struct field access must produce an approximate edge in the API."""
+    zip_bytes = _make_zip({
+        "q.sql": "INSERT INTO summary SELECT info.city AS city FROM customers"
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/lineage", params={"table": "summary", "column": "city"})
+    assert resp.status_code == 200
+    upstream_edges = resp.json()["upstream"]
+    assert len(upstream_edges) == 1
+    assert upstream_edges[0]["confidence"] == "approximate"
