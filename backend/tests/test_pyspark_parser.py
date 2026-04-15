@@ -1,3 +1,4 @@
+import pytest
 from parsers.pyspark import parse_pyspark
 from lineage.models import LineageEdge
 
@@ -58,10 +59,9 @@ def test_chained_operations():
     assert "active_orders.revenue" in targets
 
 
-def test_bad_python_returns_empty():
-    edges = parse_pyspark("def (((broken:", source_file="bad.py")
-    assert isinstance(edges, list)
-    assert len(edges) == 0
+def test_bad_python_raises_syntax_error():
+    with pytest.raises(SyntaxError):
+        parse_pyspark("def (((broken:", source_file="bad.py")
 
 
 def test_source_line_attached():

@@ -428,10 +428,7 @@ def parse_pyspark(
     if code.lstrip().startswith(_DATABRICKS_HEADER) and source_cell is None:
         return _parse_databricks_py(code, source_file)
 
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return []
+    tree = ast.parse(code)
 
     tracker = _DataFrameTracker(source_file=source_file, resolve_views=False)
     tracker.visit(tree)

@@ -235,7 +235,8 @@ def test_warning_count_on_source_after_refresh():
 
 def test_warnings_include_source_id():
     """Warnings in GET /warnings must include source_id field."""
-    zip_bytes = _make_zip({"q.sql": "SELECT amount FROM raw_orders"})
+    # A .py file with broken syntax triggers a ParseWarning in the engine
+    zip_bytes = _make_zip({"broken.py": "def f(:\n    pass"})
     resp = client.post(
         "/sources",
         data={"source_type": "upload"},
@@ -246,5 +247,7 @@ def test_warnings_include_source_id():
 
     resp = client.get("/warnings")
     assert resp.status_code == 200
+    assert len(resp.json()) > 0, "expected at least one parse warning from broken input"
     for w in resp.json():
         assert "source_id" in w, f"Warning missing source_id: {w}"
+        assert w["source_id"] == source_id
