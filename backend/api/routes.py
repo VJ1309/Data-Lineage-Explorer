@@ -67,6 +67,7 @@ async def register_source(
         "_token": token,  # stored with _ prefix so it is filtered from public responses
         "status": "registered",
         "file_count": 0,
+        "warning_count": 0,
     }
 
     VALID_SOURCE_TYPES = {"upload", "git", "databricks"}
@@ -183,7 +184,8 @@ def refresh_source(source_id: str):
 
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.parse_warnings.extend(
-        {"file": w.file, "error": w.error} for w in new_warnings
+        {"file": w.file, "error": w.error, "source_id": source_id}
+        for w in new_warnings
     )
 
     # Track which files this source contributed
@@ -195,6 +197,7 @@ def refresh_source(source_id: str):
 
     entry["status"] = "parsed"
     entry["file_count"] = len(records)
+    entry["warning_count"] = len(new_warnings)
 
     return {"ok": True, "file_count": len(records), "edge_count": new_graph.number_of_edges()}
 

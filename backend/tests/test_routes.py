@@ -214,3 +214,37 @@ def test_approximate_edge_for_struct_field():
     upstream_edges = resp.json()["upstream"]
     assert len(upstream_edges) == 1
     assert upstream_edges[0]["confidence"] == "approximate"
+
+
+def test_warning_count_on_source_after_refresh():
+    """Source entry must include warning_count after refresh."""
+    zip_bytes = _make_zip({"q.sql": "SELECT amount FROM raw_orders"})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/sources")
+    src = next(s for s in resp.json() if s["id"] == source_id)
+    assert "warning_count" in src
+    assert src["warning_count"] == 0
+
+
+def test_warnings_include_source_id():
+    """Warnings in GET /warnings must include source_id field."""
+    zip_bytes = _make_zip({"q.sql": "SELECT amount FROM raw_orders"})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/warnings")
+    assert resp.status_code == 200
+    for w in resp.json():
+        assert "source_id" in w, f"Warning missing source_id: {w}"
