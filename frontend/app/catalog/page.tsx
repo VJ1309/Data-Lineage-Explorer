@@ -49,6 +49,63 @@ function groupByRole(tables: TableSummary[]): Record<string, TableSummary[]> {
   return groups;
 }
 
+function ColumnRow({ col, onLineage }: { col: import("@/lib/api").ColumnMeta; onLineage: () => void }) {
+  const [open, setOpen] = useState(false);
+  const hasExpr = !!col.expression;
+
+  return (
+    <>
+      <tr className="border-b hover:bg-muted/40 transition-colors">
+        <td className="py-2 px-3 font-medium">{col.column}</td>
+        <td className="py-2 px-3 text-xs">
+          {col.source_tables.length > 0
+            ? col.source_tables.map((st, i) => (
+                <span key={st}>
+                  {i > 0 && <span className="text-muted-foreground">, </span>}
+                  <span className="text-blue-600 dark:text-blue-400">{st}</span>
+                </span>
+              ))
+            : <span className="text-muted-foreground">—</span>
+          }
+        </td>
+        <td className="py-2 px-3">
+          <div className="flex items-center gap-1.5">
+            <TransformBadge type={col.transform_type} />
+            {hasExpr && (
+              <button
+                onClick={() => setOpen((v) => !v)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                title="Show expression"
+              >
+                {open ? "▴" : "▾"}
+              </button>
+            )}
+          </div>
+        </td>
+        <td className="py-2 px-3 text-xs text-muted-foreground truncate max-w-[200px]">
+          {col.source_file ?? "—"}
+          {col.source_cell != null ? ` (cell ${col.source_cell})` : ""}
+          {col.source_line != null ? `:${col.source_line}` : ""}
+        </td>
+        <td className="py-2 px-3">
+          <Button size="sm" variant="ghost" className="text-xs h-6 px-2" onClick={onLineage}>
+            View Lineage →
+          </Button>
+        </td>
+      </tr>
+      {open && hasExpr && (
+        <tr className="border-b bg-muted/20">
+          <td colSpan={5} className="px-6 py-2">
+            <code className="text-xs font-mono text-purple-400 whitespace-pre-wrap break-all">
+              {col.expression}
+            </code>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 export default function CatalogPage() {
   const router = useRouter();
   const { data: tables, isLoading } = useTables();
@@ -157,40 +214,13 @@ export default function CatalogPage() {
                 </thead>
                 <tbody>
                   {columns.map((col) => (
-                    <tr key={col.id} className="border-b hover:bg-muted/40 transition-colors">
-                      <td className="py-2 px-3 font-medium">{col.column}</td>
-                      <td className="py-2 px-3 text-xs">
-                        {col.source_tables.length > 0
-                          ? col.source_tables.map((st, i) => (
-                              <span key={st}>
-                                {i > 0 && <span className="text-muted-foreground">, </span>}
-                                <span className="text-blue-600 dark:text-blue-400">{st}</span>
-                              </span>
-                            ))
-                          : <span className="text-muted-foreground">—</span>
-                        }
-                      </td>
-                      <td className="py-2 px-3">
-                        <TransformBadge type={col.transform_type} />
-                      </td>
-                      <td className="py-2 px-3 text-xs text-muted-foreground truncate max-w-[200px]">
-                        {col.source_file ?? "—"}
-                        {col.source_cell != null ? ` (cell ${col.source_cell})` : ""}
-                        {col.source_line != null ? `:${col.source_line}` : ""}
-                      </td>
-                      <td className="py-2 px-3">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-xs h-6 px-2"
-                          onClick={() =>
-                            router.push(`/lineage?table=${encodeURIComponent(selectedTable)}&column=${encodeURIComponent(col.column)}`)
-                          }
-                        >
-                          View Lineage →
-                        </Button>
-                      </td>
-                    </tr>
+                    <ColumnRow
+                      key={col.id}
+                      col={col}
+                      onLineage={() =>
+                        router.push(`/lineage?table=${encodeURIComponent(selectedTable!)}&column=${encodeURIComponent(col.column)}`)
+                      }
+                    />
                   ))}
                 </tbody>
               </table>
