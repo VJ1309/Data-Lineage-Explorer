@@ -151,8 +151,15 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         return {
           id: n.id,
           position: pos,
-          data: { label: `${table}\n${col}` },
-          style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "6px 10px", whiteSpace: "pre" as const, minWidth: 120, textAlign: "center" as const },
+          data: {
+            label: (
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 10, opacity: 0.65, marginBottom: 2, wordBreak: "break-all", lineHeight: 1.3 }}>{table}</div>
+                <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{col}</div>
+              </div>
+            ),
+          },
+          style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "6px 10px", width: 180, textAlign: "center" as const },
         };
       });
     }
@@ -175,8 +182,15 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
       return {
         id: n.id,
         position: pos,
-        data: { label: `${n.id}\n${colCount} column${colCount !== 1 ? "s" : ""}` },
-        style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "8px 14px", whiteSpace: "pre" as const, minWidth: 140, textAlign: "center" as const },
+        data: {
+          label: (
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontWeight: 600, wordBreak: "break-all", lineHeight: 1.3 }}>{n.id}</div>
+              <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>{colCount} column{colCount !== 1 ? "s" : ""}</div>
+            </div>
+          ),
+        },
+        style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "8px 12px", width: 200, textAlign: "center" as const },
       };
     });
   }, [collapsed, nodes, edges, targetColId, targetTable, colPositions, tableLevel, tablePositions]);
@@ -252,6 +266,8 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
               if (hasIn && !hasOut) return "#c084fc";
               return "#3d4f6b";
             }}
+            style={{ background: "#0d1520", border: "1px solid #1e2d42" }}
+            maskColor="rgba(10, 15, 26, 0.65)"
           />
         </ReactFlow>
         {/* Legend */}
