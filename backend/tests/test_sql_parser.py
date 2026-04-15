@@ -272,3 +272,34 @@ def test_multi_table_cte_no_phantom_table():
     )
     assert "final_table.id" in targets
     assert "final_table.val" in targets
+
+
+def test_struct_field_fallback_is_approximate():
+    """Struct field access falling back to default_table must produce an approximate edge."""
+    sql = """
+    INSERT INTO summary
+    SELECT info.city AS city, score
+    FROM customers
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    city_edges = [e for e in edges if e.target_col.endswith(".city")]
+    assert len(city_edges) == 1
+    assert city_edges[0].confidence == "approximate", (
+        f"Expected approximate, got {city_edges[0].confidence!r}"
+    )
+
+
+def test_certain_table_alias_is_certain():
+    """Column resolved via a known alias must produce a certain edge."""
+    sql = "SELECT o.order_id FROM staging.orders o"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert len(edges) == 1
+    assert edges[0].confidence == "certain"
+
+
+def test_certain_no_qualifier_is_certain():
+    """Column with no table qualifier (default_table path) must be certain."""
+    sql = "SELECT amount FROM raw_orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert len(edges) == 1
+    assert edges[0].confidence == "certain"

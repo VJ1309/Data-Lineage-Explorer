@@ -40,6 +40,7 @@ class LineageEdge:
     source_file: str = ""
     source_cell: int | None = None
     source_line: int | None = None
+    confidence: Literal["certain", "approximate"] = "certain"
 
 
 @dataclass

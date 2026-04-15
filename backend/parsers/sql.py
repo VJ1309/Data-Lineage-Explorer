@@ -142,24 +142,24 @@ def _parse_single_statement(
 
     default_table = source_tables[0] if source_tables else "unknown"
 
-    def _resolve_table_hint(hint: str) -> str:
-        """Resolve a table alias/name through alias_map, then cte_map, then source_tables.
+    def _resolve_table_hint(hint: str) -> tuple[str, bool]:
+        """Resolve a table alias/name. Returns (resolved_table, is_certain).
 
-        Falls back to default_table for unrecognized hints — e.g. struct field
-        accesses that SQLGlot parses as Column(table=hint, name=field), or CTE
-        aliases that _resolve_ctes couldn't map (multi-table CTEs).
+        is_certain=False when the hint is unrecognised (e.g. struct field
+        access or an unresolvable CTE alias); in that case default_table is
+        returned and the caller should mark the edge as approximate.
         """
         if hint in alias_map:
-            return alias_map[hint]
+            return alias_map[hint], True
         if hint in cte_map:
-            return cte_map[hint]
+            return cte_map[hint], True
         # Direct or unqualified-suffix match against known source tables
         for tbl in source_tables:
             if tbl == hint or tbl.endswith(f".{hint}"):
-                return tbl
+                return tbl, True
         # Unrecognized hint — fall back to default source table rather than
         # creating a phantom table node in the lineage graph.
-        return default_table
+        return default_table, False
 
     # Walk SELECT expressions
     for sel in select_node.selects:
@@ -189,7 +189,10 @@ def _parse_single_statement(
                     col_name = col_ref.name
                     if not col_name:
                         continue
-                    resolved_table = _resolve_table_hint(table_hint) if table_hint else default_table
+                    if table_hint:
+                        resolved_table, certain = _resolve_table_hint(table_hint)
+                    else:
+                        resolved_table, certain = default_table, True
                     edges.append(LineageEdge(
                         source_col=f"{resolved_table}.{col_name}",
                         target_col=target_col,
@@ -198,6 +201,7 @@ def _parse_single_statement(
                         source_file=source_file,
                         source_cell=source_cell,
                         source_line=source_line,
+                        confidence="certain" if certain else "approximate",
                     ))
             else:
                 edges.append(LineageEdge(
@@ -208,6 +212,7 @@ def _parse_single_statement(
                     source_file=source_file,
                     source_cell=source_cell,
                     source_line=source_line,
+                    confidence="certain",
                 ))
             continue
 
@@ -222,6 +227,7 @@ def _parse_single_statement(
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
+                confidence="certain",
             ))
             continue
 
@@ -231,9 +237,9 @@ def _parse_single_statement(
             if not col_name:
                 continue
             if table_hint:
-                resolved_table = _resolve_table_hint(table_hint)
+                resolved_table, certain = _resolve_table_hint(table_hint)
             else:
-                resolved_table = default_table
+                resolved_table, certain = default_table, True
             source_col = f"{resolved_table}.{col_name}"
 
             edges.append(LineageEdge(
@@ -244,6 +250,7 @@ def _parse_single_statement(
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
+                confidence="certain" if certain else "approximate",
             ))
 
     return edges

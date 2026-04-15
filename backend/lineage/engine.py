@@ -71,6 +71,7 @@ def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
                 source_file=e.source_file,
                 source_cell=e.source_cell,
                 source_line=e.source_line,
+                confidence=e.confidence,
             ))
         return normalized
 
@@ -92,6 +93,7 @@ def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
             source_file=e.source_file,
             source_cell=e.source_cell,
             source_line=e.source_line,
+            confidence=e.confidence,
         ))
     return normalized
 
