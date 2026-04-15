@@ -114,6 +114,9 @@ def test_impact_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert "downstream" in data
+    for edge in data["downstream"]:
+        assert "confidence" in edge, f"Impact edge missing confidence: {edge}"
+        assert edge["confidence"] in ("certain", "approximate")
 
 
 def test_search_endpoint():
@@ -187,6 +190,7 @@ def test_lineage_edge_has_confidence_field():
     resp = client.get("/lineage", params={"table": "result", "column": "total"})
     assert resp.status_code == 200
     data = resp.json()
+    assert len(data["upstream"]) > 0, "expected at least one upstream edge"
     for edge in data["upstream"] + data["downstream"] + data["graph"]["edges"]:
         assert "confidence" in edge, f"Edge missing confidence: {edge}"
         assert edge["confidence"] in ("certain", "approximate")
