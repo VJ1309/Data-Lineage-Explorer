@@ -260,6 +260,7 @@ def list_columns(table: str):
                     "source_cell": edge_data.source_cell if edge_data else None,
                     "source_line": edge_data.source_line if edge_data else None,
                     "transform_type": edge_data.transform_type if edge_data else None,
+                    "expression": edge_data.expression if edge_data else None,
                 })
     if not cols:
         raise HTTPException(status_code=404, detail=f"Table '{table}' not found")
