@@ -64,3 +64,12 @@ export function useImpact(table: string | null, column: string | null) {
 export function useWarnings() {
   return useQuery({ queryKey: ["warnings"], queryFn: api.warnings });
 }
+
+export function useSearch(q: string) {
+  return useQuery({
+    queryKey: ["search", q],
+    queryFn: () => api.search(q),
+    enabled: q.length >= 2,
+    staleTime: 10_000,
+  });
+}
