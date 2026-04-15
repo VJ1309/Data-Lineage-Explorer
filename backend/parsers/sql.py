@@ -312,6 +312,7 @@ def _resolve_temp_views(
                     source_file=e.source_file,
                     source_cell=e.source_cell,
                     source_line=e.source_line,
+                    confidence=e.confidence,
                 ))
         else:
             resolved.append(e)

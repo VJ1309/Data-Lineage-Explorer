@@ -275,7 +275,11 @@ def test_multi_table_cte_no_phantom_table():
 
 
 def test_struct_field_fallback_is_approximate():
-    """Struct field access falling back to default_table must produce an approximate edge."""
+    """Struct field access falling back to default_table must produce an approximate edge.
+
+    The adjacent unqualified column (score) must remain certain — this test
+    proves the logic discriminates rather than marking everything approximate.
+    """
     sql = """
     INSERT INTO summary
     SELECT info.city AS city, score
@@ -286,6 +290,12 @@ def test_struct_field_fallback_is_approximate():
     assert len(city_edges) == 1
     assert city_edges[0].confidence == "approximate", (
         f"Expected approximate, got {city_edges[0].confidence!r}"
+    )
+    # Adjacent unqualified column must remain certain
+    score_edges = [e for e in edges if e.target_col.endswith(".score")]
+    assert len(score_edges) == 1
+    assert score_edges[0].confidence == "certain", (
+        f"score column should be certain, got {score_edges[0].confidence!r}"
     )
 
 
