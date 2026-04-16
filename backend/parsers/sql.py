@@ -358,19 +358,51 @@ def _resolve_temp_views(
     Given edges: src.col -> temp.col -> target.col
     Produces:    src.col -> target.col (with downstream transform/expression)
     Removes all edges to/from temp views.
+
+    Handles two wildcard cases:
+    - Wildcard source (temp.* -> target.*): expands by collecting all sources
+      from all column-level entries for that temp view table.
+    - Named source not found (temp.col with no entry): falls back to the
+      temp.* wildcard entry when only a SELECT * edge was recorded.
     """
     if not temp_views:
         return edges
 
-    # Build full map of temp_view.col -> ultimate non-temp-view sources
-    # by iteratively resolving chains (step2 -> step1 -> source_table)
+    # Build full map of temp_view.col -> upstream sources
     tv_sources: dict[str, list[str]] = {}
     for e in edges:
         tbl = e.target_col.rsplit(".", 1)[0] if "." in e.target_col else ""
         if tbl in temp_views:
             tv_sources.setdefault(e.target_col, []).append(e.source_col)
 
-    # Resolve chains: if a source in tv_sources is itself a temp view col, expand it
+    def _lookup(src: str) -> list[str] | None:
+        """Return upstream sources for a temp view column with wildcard fallback.
+
+        - Exact match: return tv_sources[src].
+        - Wildcard source (tbl.*): collect sources from ALL entries for that table.
+        - Named source not found: fall back to the tbl.* wildcard entry.
+        Returns None when no upstream can be found.
+        """
+        if src in tv_sources:
+            return tv_sources[src]
+        src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
+        if src_tbl not in temp_views:
+            return None
+        if src.endswith(".*"):
+            # Gather all sources recorded for any column of this temp view
+            seen: set[str] = set()
+            result: list[str] = []
+            for key, values in tv_sources.items():
+                if key.rsplit(".", 1)[0] == src_tbl:
+                    for v in values:
+                        if v not in seen:
+                            seen.add(v)
+                            result.append(v)
+            return result if result else None
+        # Named column — fall back to wildcard entry (temp view used SELECT *)
+        return tv_sources.get(f"{src_tbl}.*")
+
+    # Resolve chains iteratively until stable
     max_iterations = len(temp_views) + 1
     for _ in range(max_iterations):
         changed = False
@@ -378,9 +410,13 @@ def _resolve_temp_views(
             expanded: list[str] = []
             for src in sources:
                 src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
-                if src_tbl in temp_views and src in tv_sources:
-                    expanded.extend(tv_sources[src])
-                    changed = True
+                if src_tbl in temp_views:
+                    upstream = _lookup(src)
+                    if upstream is not None:
+                        expanded.extend(upstream)
+                        changed = True
+                    else:
+                        expanded.append(src)
                 else:
                     expanded.append(src)
             tv_sources[tv_col] = expanded
@@ -395,18 +431,25 @@ def _resolve_temp_views(
         if tgt_tbl in temp_views:
             continue
 
-        if src_tbl in temp_views and e.source_col in tv_sources:
-            for upstream_col in tv_sources[e.source_col]:
-                resolved.append(LineageEdge(
-                    source_col=upstream_col,
-                    target_col=e.target_col,
-                    transform_type=e.transform_type,
-                    expression=e.expression,
-                    source_file=e.source_file,
-                    source_cell=e.source_cell,
-                    source_line=e.source_line,
-                    confidence=e.confidence,
-                ))
+        if src_tbl in temp_views:
+            upstream_cols = _lookup(e.source_col)
+            if upstream_cols:
+                seen_up: set[str] = set()
+                for upstream_col in upstream_cols:
+                    if upstream_col not in seen_up:
+                        seen_up.add(upstream_col)
+                        resolved.append(LineageEdge(
+                            source_col=upstream_col,
+                            target_col=e.target_col,
+                            transform_type=e.transform_type,
+                            expression=e.expression,
+                            source_file=e.source_file,
+                            source_cell=e.source_cell,
+                            source_line=e.source_line,
+                            confidence=e.confidence,
+                        ))
+            else:
+                resolved.append(e)
         else:
             resolved.append(e)
 

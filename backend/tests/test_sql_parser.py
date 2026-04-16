@@ -463,6 +463,45 @@ def test_select_star_emits_wildcard_edge():
     assert edges[0].target_col == "target.*"
 
 
+def test_temp_view_wildcard_named_chain():
+    """Wildcard temp view consumed by named column must resolve to base table.
+
+    Chain: real_table (SELECT *) -> view_a.* ; INSERT uses view_a.col
+    The named-column reference must fall back to the wildcard entry in tv_sources.
+    """
+    sql = """
+    CREATE OR REPLACE TEMPORARY VIEW view_a AS
+    SELECT * FROM real_table;
+
+    INSERT INTO final_table SELECT col_x, col_y FROM view_a
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "final_table.col_x" in targets
+    assert "final_table.col_y" in targets
+    # view_a must be fully resolved — no temp view leakage
+    assert not any("view_a" in s for s in sources), "temp view must not appear as source"
+    # Must trace back to real_table (wildcard fallback)
+    assert any("real_table" in s for s in sources), "must resolve through wildcard to real_table"
+
+
+def test_temp_view_wildcard_chain_two_hops():
+    """Two-hop wildcard chain: real -> view_a (SELECT *) -> view_b (SELECT *) -> final."""
+    sql = """
+    CREATE OR REPLACE TEMPORARY VIEW view_a AS SELECT * FROM real_table;
+    CREATE OR REPLACE TEMPORARY VIEW view_b AS SELECT * FROM view_a;
+    INSERT INTO final_table SELECT * FROM view_b
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "final_table.*" in targets
+    assert not any("view_a" in s for s in sources), "view_a must not leak as source"
+    assert not any("view_b" in s for s in sources), "view_b must not leak as source"
+    assert "real_table.*" in sources, "must resolve two-hop wildcard chain to real_table"
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []
