@@ -292,3 +292,17 @@ def test_plain_py_spark_sql_cross_call_temp_view():
     assert "final.val" in targets
     assert "source_table.id" in sources
     assert "source_table.val" in sources
+
+
+WRITE_MODE_CHAIN = '''\
+df = spark.read.table("raw_orders")
+df2 = df.select("order_id", "amount")
+df2.write.mode("overwrite").saveAsTable("staging_orders")
+'''
+
+def test_write_mode_chain_emits_edges():
+    """df.write.mode(...).saveAsTable() must emit the same edges as df.write.saveAsTable()."""
+    edges = parse_pyspark(WRITE_MODE_CHAIN, source_file="pipeline.py")
+    targets = {e.target_col for e in edges}
+    assert "staging_orders.order_id" in targets, "write chain with .mode() dropped edges"
+    assert "staging_orders.amount" in targets

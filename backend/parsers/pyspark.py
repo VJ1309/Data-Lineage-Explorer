@@ -73,10 +73,29 @@ def _chase_df_var(node: ast.expr) -> str | None:
     return None
 
 
+def _find_write_source_var(call: ast.Call) -> str | None:
+    """Walk df.write[.chainedMethod()...].writeMethod() to find the df variable.
+
+    Handles patterns like:
+      df.write.saveAsTable("t")
+      df.write.mode("overwrite").saveAsTable("t")
+      df.write.option("k","v").mode("overwrite").saveAsTable("t")
+    """
+    if not isinstance(call.func, ast.Attribute):
+        return None
+    obj = call.func.value  # object the final method is called on
+    while True:
+        if isinstance(obj, ast.Attribute) and obj.attr == "write":
+            return obj.value.id if isinstance(obj.value, ast.Name) else None
+        if isinstance(obj, ast.Call) and isinstance(obj.func, ast.Attribute):
+            obj = obj.func.value
+        else:
+            return None
+
+
 class _DataFrameTracker(ast.NodeVisitor):
-    def __init__(self, source_file: str, resolve_views: bool = True):
+    def __init__(self, source_file: str):
         self.source_file = source_file
-        self._resolve_views = resolve_views
         self.df_sources: dict[str, str] = {}   # var -> source table
         self.df_columns: dict[str, list[tuple]] = {}  # var -> [(col, transform, expr, src_cols, lineno)]
         self._join_sources: dict[str, list[str]] = {}  # var -> [table1, table2, ...]
@@ -303,16 +322,7 @@ class _DataFrameTracker(ast.NodeVisitor):
             self.generic_visit(node)
             return
 
-        # Walk back: df.write.saveAsTable -> call.func.value = df.write, .value = df
-        write_chain = call.func
-        src_var = None
-        if isinstance(write_chain, ast.Attribute):
-            wv = write_chain.value
-            if isinstance(wv, ast.Attribute) and wv.attr == "write":
-                dnode = wv.value
-                if isinstance(dnode, ast.Name):
-                    src_var = dnode.id
-
+        src_var = _find_write_source_var(call)
         if src_var is None:
             self.generic_visit(node)
             return
@@ -433,7 +443,7 @@ def parse_pyspark(
 
     tree = ast.parse(code)
 
-    tracker = _DataFrameTracker(source_file=source_file, resolve_views=False)
+    tracker = _DataFrameTracker(source_file=source_file)
     tracker.visit(tree)
 
     if source_cell is not None:
