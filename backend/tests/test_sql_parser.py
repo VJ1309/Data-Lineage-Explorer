@@ -417,3 +417,26 @@ def test_subquery_alias_not_in_graph_nodes():
     assert "sub" not in node_tables, f"subquery alias 'sub' appeared as a table node: {node_tables}"
     assert "source_table" in node_tables
     assert "result" in node_tables
+
+
+def test_select_star_emits_wildcard_edge():
+    """SELECT * must emit a source.* -> target.* wildcard edge, not silence."""
+    sql = "INSERT INTO target SELECT * FROM source_table"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert len(edges) == 1
+    assert edges[0].source_col == "source_table.*"
+    assert edges[0].target_col == "target.*"
+
+
+def test_bad_sql_collects_warning():
+    """SQLGlot parse failure must surface in _warnings when caller passes the list."""
+    warnings_list: list[str] = []
+    edges = parse_sql(
+        "THIS IS NOT SQL !!!###",
+        source_file="bad.sql",
+        source_line=1,
+        _warnings=warnings_list,
+    )
+    assert edges == []
+    assert len(warnings_list) == 1
+    assert warnings_list[0]  # non-empty error message

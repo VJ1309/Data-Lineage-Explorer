@@ -10,13 +10,15 @@ from parsers.notebook import parse_notebook
 def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarning]]:
     edges: list[LineageEdge] = []
     warnings: list[ParseWarning] = []
+    sql_parse_errors: list[str] = []
     try:
         if record.type == "notebook":
             edges = parse_notebook(record.content, source_file=record.path)
         elif record.type == "python":
             edges = parse_pyspark(record.content, source_file=record.path)
         elif record.type == "sql":
-            edges = parse_sql(record.content, source_file=record.path, source_line=1)
+            edges = parse_sql(record.content, source_file=record.path, source_line=1,
+                              _warnings=sql_parse_errors)
         else:
             warnings.append(ParseWarning(
                 file=record.path,
@@ -24,6 +26,8 @@ def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarnin
             ))
     except Exception as exc:
         warnings.append(ParseWarning(file=record.path, error=str(exc)))
+    for err in sql_parse_errors:
+        warnings.append(ParseWarning(file=record.path, error=f"SQL parse error: {err}"))
     return edges, warnings
 
 
@@ -139,7 +143,7 @@ def build_graph(records: list[FileRecord]) -> nx.DiGraph:
 
 
 def upstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
-    """Return all LineageEdge objects on paths leading TO col_id (BFS backwards)."""
+    """Return all LineageEdge objects on paths leading TO col_id (DFS backwards)."""
     if col_id not in graph:
         return []
     edges: list[LineageEdge] = []
@@ -162,7 +166,7 @@ def upstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
 
 
 def downstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
-    """Return all LineageEdge objects on paths leading FROM col_id (BFS forwards)."""
+    """Return all LineageEdge objects on paths leading FROM col_id (DFS forwards)."""
     if col_id not in graph:
         return []
     edges: list[LineageEdge] = []

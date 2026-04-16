@@ -438,7 +438,7 @@ def _split_databricks_sql(sql: str) -> list[tuple[str, int]]:
         # Remove leading header if present
         if cleaned.startswith(_DATABRICKS_SQL_HEADER):
             cleaned = cleaned[len(_DATABRICKS_SQL_HEADER):].strip()
-        if cleaned and not cleaned.startswith("--") or "\n" in cleaned:
+        if (cleaned and not cleaned.startswith("--")) or "\n" in cleaned:
             # Filter out cells that are only comments (like %md magic)
             non_comment_lines = [
                 l for l in cleaned.splitlines()
@@ -456,6 +456,7 @@ def parse_sql(
     source_line: int | None,
     source_cell: int | None = None,
     _resolve_views: bool = True,
+    _warnings: list[str] | None = None,
 ) -> list[LineageEdge]:
     """Parse SQL (single or multi-statement) and return column-level lineage edges.
 
@@ -472,13 +473,16 @@ def parse_sql(
             temp_views.update(_detect_temp_views(cell_sql))
             edges.extend(
                 parse_sql(cell_sql, source_file, source_line=None,
-                          source_cell=cell_idx, _resolve_views=False)
+                          source_cell=cell_idx, _resolve_views=False,
+                          _warnings=_warnings)
             )
         return _resolve_temp_views(edges, temp_views)
 
     try:
         statements = sqlglot.parse(sql, dialect="databricks")
-    except Exception:
+    except Exception as exc:
+        if _warnings is not None:
+            _warnings.append(str(exc))
         return []
 
     temp_views: set[str] = set()
