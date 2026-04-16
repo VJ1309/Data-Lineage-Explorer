@@ -180,7 +180,8 @@ def test_spark_sql_assign():
 
 
 def test_spark_sql_source_line():
-    edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py")
+    assert len(edges) > 0, "expected edges from spark.sql INSERT"
     for edge in edges:
         assert edge.source_line is not None
 
