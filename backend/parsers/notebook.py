@@ -62,6 +62,7 @@ def parse_notebook(
                 source,
                 source_file=source_file,
                 source_cell=cell_idx,
+                _warnings=_warnings,
             )
 
         edges.extend(cell_edges)
