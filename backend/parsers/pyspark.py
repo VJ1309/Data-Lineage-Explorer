@@ -81,6 +81,7 @@ class _DataFrameTracker(ast.NodeVisitor):
         self.df_columns: dict[str, list[tuple]] = {}  # var -> [(col, transform, expr, src_cols, lineno)]
         self._join_sources: dict[str, list[str]] = {}  # var -> [table1, table2, ...]
         self.edges: list[LineageEdge] = []
+        self.temp_views: set[str] = set()
 
     def _propagate_join_sources(self, target_var: str, source_var: str | None) -> None:
         """Copy join source info from source_var to target_var."""
@@ -142,11 +143,12 @@ class _DataFrameTracker(ast.NodeVisitor):
             # df = spark.sql("SELECT ...") — parse SQL and emit edges directly
             sql_str = self._get_spark_sql(value)
             if sql_str:
+                self.temp_views.update(_detect_temp_views(sql_str))
                 sql_edges = _parse_sql(
                     sql_str,
                     source_file=self.source_file,
                     source_line=node.lineno,
-                    _resolve_views=self._resolve_views,
+                    _resolve_views=False,  # resolution at tracker level
                 )
                 self.edges.extend(sql_edges)
                 self.generic_visit(node)
@@ -285,11 +287,12 @@ class _DataFrameTracker(ast.NodeVisitor):
         # Handle standalone spark.sql("...") calls (e.g., CREATE VIEW)
         sql_str = self._get_spark_sql(call)
         if sql_str:
+            self.temp_views.update(_detect_temp_views(sql_str))
             sql_edges = _parse_sql(
                 sql_str,
                 source_file=self.source_file,
                 source_line=node.lineno,
-                _resolve_views=self._resolve_views,
+                _resolve_views=False,  # resolution at tracker level
             )
             self.edges.extend(sql_edges)
             self.generic_visit(node)
@@ -437,4 +440,7 @@ def parse_pyspark(
         for edge in tracker.edges:
             edge.source_cell = source_cell
 
-    return tracker.edges
+    edges = tracker.edges
+    if _resolve_views and tracker.temp_views:
+        edges = _resolve_temp_views(edges, tracker.temp_views)
+    return edges

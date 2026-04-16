@@ -156,10 +156,9 @@ df.write.saveAsTable("staging_orders")
 
 def test_spark_sql_create_view():
     edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
-    assert len(edges) >= 2
-    targets = {e.target_col for e in edges}
-    assert "Cost_To_Recv.TRK_NUM" in targets
-    assert "Cost_To_Recv.CARR_CD" in targets
+    # A standalone temp view with no downstream consumer produces no lineage edges
+    # after resolution (temp view edges are internal/intermediate).
+    assert len(edges) == 0
 
 
 def test_spark_sql_insert():
@@ -274,3 +273,21 @@ def test_regular_python_not_treated_as_databricks():
     edges = parse_pyspark(code, source_file="regular.py")
     # Should not crash or misbehave
     assert isinstance(edges, list)
+
+
+SPARK_SQL_CROSS_CALL_TEMP_VIEW = '''\
+spark.sql("CREATE OR REPLACE TEMP VIEW staging AS SELECT id, val FROM source_table")
+spark.sql("INSERT INTO final SELECT id, val FROM staging")
+'''
+
+def test_plain_py_spark_sql_cross_call_temp_view():
+    """Temp view created in one spark.sql() call must be resolved in a later call."""
+    edges = parse_pyspark(SPARK_SQL_CROSS_CALL_TEMP_VIEW, source_file="pipeline.py")
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "staging.id" not in targets, "temp view must not appear as a target"
+    assert "staging.val" not in targets
+    assert "final.id" in targets
+    assert "final.val" in targets
+    assert "source_table.id" in sources
+    assert "source_table.val" in sources
