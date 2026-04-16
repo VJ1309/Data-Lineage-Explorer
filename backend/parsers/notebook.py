@@ -25,6 +25,7 @@ def _strip_sql_magic(source: str) -> str:
 def parse_notebook(
     content: str,
     source_file: str,
+    _warnings: list[str] | None = None,
 ) -> list[LineageEdge]:
     """Parse a Jupyter notebook JSON string and return all lineage edges."""
     try:
@@ -54,6 +55,7 @@ def parse_notebook(
                 source_line=None,
                 source_cell=cell_idx,
                 _resolve_views=False,  # resolution happens at notebook level
+                _warnings=_warnings,
             )
         else:
             cell_edges = parse_pyspark(

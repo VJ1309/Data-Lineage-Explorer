@@ -13,9 +13,11 @@ def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarnin
     sql_parse_errors: list[str] = []
     try:
         if record.type == "notebook":
-            edges = parse_notebook(record.content, source_file=record.path)
+            edges = parse_notebook(record.content, source_file=record.path,
+                                   _warnings=sql_parse_errors)
         elif record.type == "python":
-            edges = parse_pyspark(record.content, source_file=record.path)
+            edges = parse_pyspark(record.content, source_file=record.path,
+                                  _warnings=sql_parse_errors)
         elif record.type == "sql":
             edges = parse_sql(record.content, source_file=record.path, source_line=1,
                               _warnings=sql_parse_errors)

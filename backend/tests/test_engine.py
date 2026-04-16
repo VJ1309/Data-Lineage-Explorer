@@ -65,8 +65,6 @@ def test_parse_warnings_collected():
 
 def test_sql_parse_error_surfaces_as_warning():
     """A file whose SQL cannot be parsed must produce a ParseWarning, not silent empty."""
-    from lineage.engine import build_graph_with_warnings
-    from lineage.models import FileRecord
     record = FileRecord(
         path="bad.sql",
         content="THIS IS NOT SQL !!!###",
