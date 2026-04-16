@@ -41,6 +41,12 @@ def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
     cte_map: dict[str, str] = {}
     with_clause = statement.args.get("with_")
     if not with_clause:
+        # For CREATE TABLE/VIEW AS WITH ... SELECT ..., SQLGlot attaches the WITH
+        # clause to the inner SELECT body, not the outer CREATE/INSERT wrapper.
+        body = statement.args.get("expression")
+        if body is not None:
+            with_clause = body.args.get("with_")
+    if not with_clause:
         return cte_map
     for cte in with_clause.expressions:
         alias = cte.alias

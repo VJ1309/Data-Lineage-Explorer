@@ -329,6 +329,41 @@ def test_chained_ctes_resolve_to_source():
     assert not any(s.startswith("cte2.") for s in sources), "cte2 must be resolved away"
 
 
+def test_create_table_as_with_cte():
+    """CREATE TABLE AS WITH cte AS (...) SELECT must resolve CTE to base table."""
+    sql = """
+    CREATE TABLE output_table AS
+    WITH base AS (SELECT col_a, col_b FROM source_table)
+    SELECT col_a, col_b FROM base
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "output_table.col_a" in targets
+    assert "output_table.col_b" in targets
+    assert "source_table.col_a" in sources, "CTE 'base' must resolve to source_table"
+    assert "source_table.col_b" in sources
+    assert not any(s.startswith("base.") for s in sources), "CTE alias must not leak"
+
+
+def test_create_temp_view_as_with_cte_consumer():
+    """CREATE TEMP VIEW with CTE; downstream consumer must trace to base table."""
+    sql = """
+    CREATE OR REPLACE TEMPORARY VIEW staging AS
+    WITH raw AS (SELECT id, amount FROM orders)
+    SELECT id, amount FROM raw;
+
+    INSERT INTO summary SELECT id, amount FROM staging
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "summary.id" in targets
+    assert "orders.id" in sources, "must trace through CTE and temp view to orders"
+    assert not any(s.startswith("raw.") for s in sources), "CTE alias must not leak"
+    assert not any(s.startswith("staging.") for s in sources), "temp view must not leak"
+
+
 def test_union_all_both_branches_produce_edges():
     """Both branches of UNION ALL must emit edges to the same target."""
     sql = """
