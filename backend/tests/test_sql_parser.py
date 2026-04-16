@@ -354,3 +354,34 @@ def test_union_standalone_result():
     assert "t1.a" in sources
     assert "t2.a" in sources
     assert any(t.startswith("result.") for t in targets), "standalone UNION must use 'result' target"
+
+
+def test_subquery_in_from_traces_to_base_table():
+    """Columns from an inline subquery must trace back to the base table, not 'subquery'."""
+    sql = """
+    INSERT INTO result
+    SELECT id, val FROM (SELECT id, val FROM source_table) sub
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "source_table.id" in sources, "must trace through subquery to base table"
+    assert "source_table.val" in sources
+    assert "result.id" in targets
+    assert "result.val" in targets
+    assert not any(s.startswith("subquery.") for s in sources), "phantom 'subquery' table found"
+
+
+def test_subquery_with_alias_join():
+    """Subquery in JOIN must also trace through to its source table."""
+    sql = """
+    INSERT INTO result
+    SELECT a.id, sub.metric
+    FROM base_table a
+    JOIN (SELECT id, SUM(val) AS metric FROM detail_table GROUP BY id) sub
+      ON a.id = sub.id
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert "base_table.id" in sources
+    assert "detail_table.val" in sources

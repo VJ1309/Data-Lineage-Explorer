@@ -156,7 +156,16 @@ def _parse_select_node(
             alias_map[alias] = resolved
         source_tables.append(resolved)
     elif isinstance(from_table, exp.Subquery):
-        source_tables.append("subquery")
+        sub_alias = from_table.alias or f"__sub_{id(from_table)}__"
+        source_tables.append(sub_alias)
+        if from_table.alias:
+            alias_map[from_table.alias] = sub_alias
+        sub_selects = _collect_union_selects(from_table.this) if from_table.this else []
+        for sub_sel in sub_selects:
+            edges.extend(_parse_select_node(
+                sub_sel, sub_alias, cte_map,
+                source_file, source_line, source_cell,
+            ))
 
     for join in select_node.find_all(exp.Join):
         jtable = join.this
@@ -167,6 +176,17 @@ def _parse_select_node(
             if alias:
                 alias_map[alias] = resolved
             source_tables.append(resolved)
+        elif isinstance(jtable, exp.Subquery):
+            sub_alias = jtable.alias or f"__sub_{id(jtable)}__"
+            source_tables.append(sub_alias)
+            if jtable.alias:
+                alias_map[jtable.alias] = sub_alias
+            sub_selects = _collect_union_selects(jtable.this) if jtable.this else []
+            for sub_sel in sub_selects:
+                edges.extend(_parse_select_node(
+                    sub_sel, sub_alias, cte_map,
+                    source_file, source_line, source_cell,
+                ))
 
     default_table = source_tables[0] if source_tables else "unknown"
 
