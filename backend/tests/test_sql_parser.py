@@ -385,3 +385,19 @@ def test_subquery_with_alias_join():
     sources = {e.source_col for e in edges}
     assert "base_table.id" in sources
     assert "detail_table.val" in sources
+
+
+def test_subquery_with_inner_join_no_leak():
+    """Inner JOIN tables inside a subquery must not appear as outer source tables."""
+    sql = """
+    INSERT INTO result
+    SELECT sub.y
+    FROM (SELECT a.x, b.y FROM t1 a JOIN t2 b ON a.id = b.id) sub
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    # t2 is inside the subquery — must NOT appear as a direct source to result.*
+    spurious = [s for s in sources if s.startswith("t2.") and
+                any(e.target_col.startswith("result.") for e in edges if e.source_col == s)]
+    assert not spurious, f"inner JOIN table t2 leaked into outer scope: {spurious}"
+    assert "result.y" in {e.target_col for e in edges}

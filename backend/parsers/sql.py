@@ -115,6 +115,36 @@ def _collect_union_selects(node: exp.Expression) -> list[exp.Select]:
     return []
 
 
+_subquery_counter: list[int] = [0]  # mutable container for module-level counter
+
+
+def _next_sub_alias() -> str:
+    _subquery_counter[0] += 1
+    return f"__sub_{_subquery_counter[0]}__"
+
+
+def _process_subquery(
+    subq: exp.Subquery,
+    edges: list[LineageEdge],
+    source_tables: list[str],
+    alias_map: dict[str, str],
+    cte_map: dict[str, str],
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> None:
+    """Recursively parse a subquery and register its alias as a source table."""
+    sub_alias = subq.alias or _next_sub_alias()
+    source_tables.append(sub_alias)
+    if subq.alias:
+        alias_map[subq.alias] = sub_alias
+    sub_selects = _collect_union_selects(subq.this) if subq.this else []
+    for sub_sel in sub_selects:
+        edges.extend(_parse_select_node(
+            sub_sel, sub_alias, cte_map, source_file, source_line, source_cell,
+        ))
+
+
 def _get_statement_body(statement: exp.Expression) -> exp.Expression | None:
     """Return the query body (SELECT or UNION) stripping INSERT/CREATE wrapper."""
     if isinstance(statement, exp.Select):
@@ -156,18 +186,10 @@ def _parse_select_node(
             alias_map[alias] = resolved
         source_tables.append(resolved)
     elif isinstance(from_table, exp.Subquery):
-        sub_alias = from_table.alias or f"__sub_{id(from_table)}__"
-        source_tables.append(sub_alias)
-        if from_table.alias:
-            alias_map[from_table.alias] = sub_alias
-        sub_selects = _collect_union_selects(from_table.this) if from_table.this else []
-        for sub_sel in sub_selects:
-            edges.extend(_parse_select_node(
-                sub_sel, sub_alias, cte_map,
-                source_file, source_line, source_cell,
-            ))
+        _process_subquery(from_table, edges, source_tables, alias_map, cte_map,
+                          source_file, source_line, source_cell)
 
-    for join in select_node.find_all(exp.Join):
+    for join in (select_node.args.get("joins") or []):
         jtable = join.this
         if isinstance(jtable, exp.Table):
             qualified = _qualified_table_name(jtable)
@@ -177,16 +199,8 @@ def _parse_select_node(
                 alias_map[alias] = resolved
             source_tables.append(resolved)
         elif isinstance(jtable, exp.Subquery):
-            sub_alias = jtable.alias or f"__sub_{id(jtable)}__"
-            source_tables.append(sub_alias)
-            if jtable.alias:
-                alias_map[jtable.alias] = sub_alias
-            sub_selects = _collect_union_selects(jtable.this) if jtable.this else []
-            for sub_sel in sub_selects:
-                edges.extend(_parse_select_node(
-                    sub_sel, sub_alias, cte_map,
-                    source_file, source_line, source_cell,
-                ))
+            _process_subquery(jtable, edges, source_tables, alias_map, cte_map,
+                              source_file, source_line, source_cell)
 
     default_table = source_tables[0] if source_tables else "unknown"
 
