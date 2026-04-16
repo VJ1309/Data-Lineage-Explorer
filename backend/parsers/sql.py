@@ -132,16 +132,18 @@ def _process_subquery(
     source_file: str,
     source_line: int | None,
     source_cell: int | None,
+    subquery_aliases: set[str] | None = None,
 ) -> None:
     """Recursively parse a subquery and register its alias as a source table."""
     sub_alias = subq.alias or _next_sub_alias()
     source_tables.append(sub_alias)
-    if subq.alias:
-        alias_map[subq.alias] = sub_alias
+    if subquery_aliases is not None:
+        subquery_aliases.add(sub_alias)
     sub_selects = _collect_union_selects(subq.this) if subq.this else []
     for sub_sel in sub_selects:
         edges.extend(_parse_select_node(
             sub_sel, sub_alias, cte_map, source_file, source_line, source_cell,
+            subquery_aliases=subquery_aliases,
         ))
 
 
@@ -165,6 +167,7 @@ def _parse_select_node(
     source_file: str,
     source_line: int | None,
     source_cell: int | None,
+    subquery_aliases: set[str] | None = None,
 ) -> list[LineageEdge]:
     """Parse a single SELECT node and return column-level lineage edges."""
     edges: list[LineageEdge] = []
@@ -187,7 +190,8 @@ def _parse_select_node(
         source_tables.append(resolved)
     elif isinstance(from_table, exp.Subquery):
         _process_subquery(from_table, edges, source_tables, alias_map, cte_map,
-                          source_file, source_line, source_cell)
+                          source_file, source_line, source_cell,
+                          subquery_aliases=subquery_aliases)
 
     for join in (select_node.args.get("joins") or []):
         jtable = join.this
@@ -200,7 +204,8 @@ def _parse_select_node(
             source_tables.append(resolved)
         elif isinstance(jtable, exp.Subquery):
             _process_subquery(jtable, edges, source_tables, alias_map, cte_map,
-                              source_file, source_line, source_cell)
+                              source_file, source_line, source_cell,
+                              subquery_aliases=subquery_aliases)
 
     default_table = source_tables[0] if source_tables else "unknown"
 
@@ -326,12 +331,16 @@ def _parse_single_statement(
 
     cte_map = _resolve_ctes(statement)
     target_table = _find_target_table(statement)
+    subquery_aliases: set[str] = set()
     edges: list[LineageEdge] = []
     for select_node in select_nodes:
         edges.extend(_parse_select_node(
             select_node, target_table, cte_map,
             source_file, source_line, source_cell,
+            subquery_aliases=subquery_aliases,
         ))
+    if subquery_aliases:
+        edges = _resolve_temp_views(edges, subquery_aliases)
     return edges
 
 

@@ -388,7 +388,7 @@ def test_subquery_with_alias_join():
 
 
 def test_subquery_with_inner_join_no_leak():
-    """Inner JOIN tables inside a subquery must not appear as outer source tables."""
+    """Inner JOIN tables inside a subquery trace through to outer target after alias resolution."""
     sql = """
     INSERT INTO result
     SELECT sub.y
@@ -396,8 +396,24 @@ def test_subquery_with_inner_join_no_leak():
     """
     edges = parse_sql(sql, source_file="q.sql", source_line=1)
     sources = {e.source_col for e in edges}
-    # t2 is inside the subquery — must NOT appear as a direct source to result.*
-    spurious = [s for s in sources if s.startswith("t2.") and
-                any(e.target_col.startswith("result.") for e in edges if e.source_col == s)]
-    assert not spurious, f"inner JOIN table t2 leaked into outer scope: {spurious}"
-    assert "result.y" in {e.target_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # sub alias should be resolved away — real sources trace directly to result
+    source_tables = {s.rsplit(".", 1)[0] for s in sources}
+    assert "sub" not in source_tables, f"subquery alias 'sub' not resolved: {sources}"
+    # t2.y should now trace directly to result.y (correct lineage after alias resolution)
+    assert "t2.y" in sources
+    assert "result.y" in targets
+
+
+def test_subquery_alias_not_in_graph_nodes():
+    """Subquery aliases must be resolved away — not appear as intermediate table nodes."""
+    from lineage.engine import build_graph
+    from lineage.models import FileRecord
+    sql = "INSERT INTO result SELECT id, val FROM (SELECT id, val FROM source_table) sub"
+    record = FileRecord(path="q.sql", content=sql, type="sql", source_ref="test")
+    graph = build_graph([record])
+    nodes = set(graph.nodes())
+    node_tables = {n.rsplit(".", 1)[0] for n in nodes if "." in n}
+    assert "sub" not in node_tables, f"subquery alias 'sub' appeared as a table node: {node_tables}"
+    assert "source_table" in node_tables
+    assert "result" in node_tables
