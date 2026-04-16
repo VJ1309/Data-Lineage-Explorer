@@ -66,13 +66,6 @@ def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
     return cte_map
 
 
-def _find_select(statement: exp.Expression) -> exp.Select | None:
-    """Extract the innermost SELECT from any statement type."""
-    if isinstance(statement, exp.Select):
-        return statement
-    return statement.find(exp.Select)
-
-
 def _qualified_table_name(table: exp.Table) -> str:
     """Return schema-qualified table name when schema is present."""
     name = table.name

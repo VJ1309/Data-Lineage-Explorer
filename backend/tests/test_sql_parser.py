@@ -350,5 +350,7 @@ def test_union_standalone_result():
     sql = "SELECT a FROM t1 UNION ALL SELECT a FROM t2"
     edges = parse_sql(sql, source_file="q.sql", source_line=1)
     sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
     assert "t1.a" in sources
     assert "t2.a" in sources
+    assert any(t.startswith("result.") for t in targets), "standalone UNION must use 'result' target"
