@@ -33,9 +33,12 @@ def _classify_transform(node: exp.Expression) -> tuple[str, str | None]:
 
 
 def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
-    """Build map of CTE alias -> source table name (best-effort, one level deep)."""
+    """Build map of CTE alias -> source table name (best-effort, single-source CTEs).
+
+    Resolves chains: if cte2 references cte1, cte2 maps to cte1's source.
+    Multi-source CTEs (JOINs) are omitted; _resolve_table_hint falls back gracefully.
+    """
     cte_map: dict[str, str] = {}
-    # SQLGlot uses 'with_' as the arg key for WITH clause
     with_clause = statement.args.get("with_")
     if not with_clause:
         return cte_map
@@ -48,6 +51,18 @@ def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
             table_expr = from_clause.this
             if isinstance(table_expr, exp.Table):
                 cte_map[alias] = _qualified_table_name(table_expr)
+
+    # Resolve chains: cte2 -> cte1 -> actual_table
+    max_iterations = len(cte_map) + 1
+    for _ in range(max_iterations):
+        changed = False
+        for alias, target in list(cte_map.items()):
+            if target in cte_map:
+                cte_map[alias] = cte_map[target]
+                changed = True
+        if not changed:
+            break
+
     return cte_map
 
 

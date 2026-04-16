@@ -313,3 +313,17 @@ def test_certain_no_qualifier_is_certain():
     edges = parse_sql(sql, source_file="q.sql", source_line=1)
     assert len(edges) == 1
     assert edges[0].confidence == "certain"
+
+
+def test_chained_ctes_resolve_to_source():
+    """CTE2 referencing CTE1 must resolve all the way to the base table."""
+    sql = """
+    WITH cte1 AS (SELECT id, val FROM source_table),
+         cte2 AS (SELECT id, val FROM cte1)
+    INSERT INTO final SELECT id, val FROM cte2
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert any("source_table" in s for s in sources), "must trace back to source_table"
+    assert not any(s.startswith("cte1.") for s in sources), "cte1 must be resolved away"
+    assert not any(s.startswith("cte2.") for s in sources), "cte2 must be resolved away"
