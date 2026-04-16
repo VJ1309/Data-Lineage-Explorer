@@ -127,7 +127,6 @@ def _process_subquery(
     subq: exp.Subquery,
     edges: list[LineageEdge],
     source_tables: list[str],
-    alias_map: dict[str, str],
     cte_map: dict[str, str],
     source_file: str,
     source_line: int | None,
@@ -189,7 +188,7 @@ def _parse_select_node(
             alias_map[alias] = resolved
         source_tables.append(resolved)
     elif isinstance(from_table, exp.Subquery):
-        _process_subquery(from_table, edges, source_tables, alias_map, cte_map,
+        _process_subquery(from_table, edges, source_tables, cte_map,
                           source_file, source_line, source_cell,
                           subquery_aliases=subquery_aliases)
 
@@ -203,7 +202,7 @@ def _parse_select_node(
                 alias_map[alias] = resolved
             source_tables.append(resolved)
         elif isinstance(jtable, exp.Subquery):
-            _process_subquery(jtable, edges, source_tables, alias_map, cte_map,
+            _process_subquery(jtable, edges, source_tables, cte_map,
                               source_file, source_line, source_cell,
                               subquery_aliases=subquery_aliases)
 
