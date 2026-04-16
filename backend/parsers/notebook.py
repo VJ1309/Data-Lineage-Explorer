@@ -1,7 +1,7 @@
 """Notebook parser using nbformat. Routes cells to SQL or PySpark parsers."""
 from __future__ import annotations
 import nbformat
-from parsers.sql import parse_sql
+from parsers.sql import parse_sql, _detect_temp_views, _resolve_temp_views
 from parsers.pyspark import parse_pyspark
 from lineage.models import LineageEdge
 
@@ -33,6 +33,7 @@ def parse_notebook(
         return []
 
     edges: list[LineageEdge] = []
+    temp_views: set[str] = set()
 
     for cell_idx, cell in enumerate(nb.cells):
         if cell.cell_type != "code":
@@ -46,11 +47,13 @@ def parse_notebook(
 
         if _is_sql_cell(source) or lang == "sql":
             sql = _strip_sql_magic(source)
+            temp_views.update(_detect_temp_views(sql))
             cell_edges = parse_sql(
                 sql,
                 source_file=source_file,
                 source_line=None,
                 source_cell=cell_idx,
+                _resolve_views=False,  # resolution happens at notebook level
             )
         else:
             cell_edges = parse_pyspark(
@@ -61,4 +64,4 @@ def parse_notebook(
 
         edges.extend(cell_edges)
 
-    return edges
+    return _resolve_temp_views(edges, temp_views)

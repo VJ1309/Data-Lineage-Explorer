@@ -70,3 +70,20 @@ def test_markdown_cells_skipped():
 def test_bad_json_returns_empty():
     edges = parse_notebook("not json at all", source_file="bad.ipynb")
     assert edges == []
+
+
+def test_cross_cell_temp_view_resolution():
+    """Temp view created in cell 0 must be resolved away in cell 1."""
+    nb = _make_notebook([
+        _code_cell("%sql\nCREATE OR REPLACE TEMP VIEW stg AS SELECT id, val FROM source_table"),
+        _code_cell("%sql\nINSERT INTO final SELECT id, val FROM stg"),
+    ])
+    edges = parse_notebook(nb, source_file="nb.ipynb")
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "stg.id" not in targets, "temp view must not appear as a target"
+    assert "stg.val" not in targets
+    assert "final.id" in targets
+    assert "final.val" in targets
+    assert "source_table.id" in sources
+    assert "source_table.val" in sources
