@@ -111,19 +111,39 @@ def _find_target_table(statement: exp.Expression) -> str:
     return "result"
 
 
-def _parse_single_statement(
-    statement: exp.Expression,
+def _collect_union_selects(node: exp.Expression) -> list[exp.Select]:
+    """Recursively collect all SELECT branches from a UNION/INTERSECT/EXCEPT tree."""
+    if isinstance(node, exp.Select):
+        return [node]
+    if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
+        return _collect_union_selects(node.this) + _collect_union_selects(node.expression)
+    if isinstance(node, exp.Subquery):
+        return _collect_union_selects(node.this)
+    return []
+
+
+def _get_statement_body(statement: exp.Expression) -> exp.Expression | None:
+    """Return the query body (SELECT or UNION) stripping INSERT/CREATE wrapper."""
+    if isinstance(statement, exp.Select):
+        return statement
+    if isinstance(statement, (exp.Union, exp.Intersect, exp.Except)):
+        return statement
+    if isinstance(statement, exp.Insert):
+        return statement.args.get("expression")
+    if isinstance(statement, exp.Create):
+        return statement.args.get("expression")
+    return None
+
+
+def _parse_select_node(
+    select_node: exp.Select,
+    target_table: str,
+    cte_map: dict[str, str],
     source_file: str,
     source_line: int | None,
     source_cell: int | None,
 ) -> list[LineageEdge]:
-    """Parse a single SQL statement and return column-level lineage edges."""
-    select_node = _find_select(statement)
-    if select_node is None:
-        return []
-
-    cte_map = _resolve_ctes(statement)
-    target_table = _find_target_table(statement)
+    """Parse a single SELECT node and return column-level lineage edges."""
     edges: list[LineageEdge] = []
 
     # Collect source tables from FROM + JOINs
@@ -158,27 +178,18 @@ def _parse_single_statement(
     default_table = source_tables[0] if source_tables else "unknown"
 
     def _resolve_table_hint(hint: str) -> tuple[str, bool]:
-        """Resolve a table alias/name. Returns (resolved_table, is_certain).
-
-        is_certain=False when the hint is unrecognised (e.g. struct field
-        access or an unresolvable CTE alias); in that case default_table is
-        returned and the caller should mark the edge as approximate.
-        """
+        """Resolve a table alias/name. Returns (resolved_table, is_certain)."""
         if hint in alias_map:
             return alias_map[hint], True
         if hint in cte_map:
             return cte_map[hint], True
-        # Direct or unqualified-suffix match against known source tables
         for tbl in source_tables:
             if tbl == hint or tbl.endswith(f".{hint}"):
                 return tbl, True
-        # Unrecognized hint — fall back to default source table rather than
-        # creating a phantom table node in the lineage graph.
         return default_table, False
 
     # Walk SELECT expressions
     for sel in select_node.selects:
-        # Determine output column alias
         if isinstance(sel, exp.Alias):
             alias = sel.alias
             expr_node = sel.this
@@ -195,7 +206,6 @@ def _parse_single_statement(
         target_col = f"{target_table}.{alias}"
         transform_type, expr_str = _classify_transform(expr_node)
 
-        # For window functions, extract actual column refs from the window expression
         if transform_type == "window":
             win_col_refs = list(expr_node.find_all(exp.Column))
             if win_col_refs:
@@ -256,7 +266,6 @@ def _parse_single_statement(
             else:
                 resolved_table, certain = default_table, True
             source_col = f"{resolved_table}.{col_name}"
-
             edges.append(LineageEdge(
                 source_col=source_col,
                 target_col=target_col,
@@ -268,6 +277,34 @@ def _parse_single_statement(
                 confidence="certain" if certain else "approximate",
             ))
 
+    return edges
+
+
+def _parse_single_statement(
+    statement: exp.Expression,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    """Parse a single SQL statement (handles UNION/UNION ALL) and return lineage edges."""
+    body = _get_statement_body(statement)
+    if body is None:
+        body = statement.find(exp.Select)
+    if body is None:
+        return []
+
+    select_nodes = _collect_union_selects(body)
+    if not select_nodes:
+        return []
+
+    cte_map = _resolve_ctes(statement)
+    target_table = _find_target_table(statement)
+    edges: list[LineageEdge] = []
+    for select_node in select_nodes:
+        edges.extend(_parse_select_node(
+            select_node, target_table, cte_map,
+            source_file, source_line, source_cell,
+        ))
     return edges
 
 

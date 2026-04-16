@@ -327,3 +327,28 @@ def test_chained_ctes_resolve_to_source():
     assert any("source_table" in s for s in sources), "must trace back to source_table"
     assert not any(s.startswith("cte1.") for s in sources), "cte1 must be resolved away"
     assert not any(s.startswith("cte2.") for s in sources), "cte2 must be resolved away"
+
+
+def test_union_all_both_branches_produce_edges():
+    """Both branches of UNION ALL must emit edges to the same target."""
+    sql = """
+    INSERT INTO combined
+    SELECT id, val FROM table_a
+    UNION ALL
+    SELECT id, val FROM table_b
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "table_a.id" in sources, "first UNION branch missing"
+    assert "table_b.id" in sources, "second UNION branch missing"
+    assert "combined.id" in targets
+
+
+def test_union_standalone_result():
+    """UNION without INSERT uses 'result' as synthetic target."""
+    sql = "SELECT a FROM t1 UNION ALL SELECT a FROM t2"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert "t1.a" in sources
+    assert "t2.a" in sources
