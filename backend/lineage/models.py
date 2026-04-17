@@ -41,6 +41,7 @@ class LineageEdge:
     source_cell: int | None = None
     source_line: int | None = None
     confidence: Literal["certain", "approximate"] = "certain"
+    qualified: bool = True
 
 
 @dataclass
@@ -55,3 +56,4 @@ class SourceConfig:
 class ParseWarning:
     file: str
     error: str
+    severity: Literal["info", "warn", "error"] = "warn"

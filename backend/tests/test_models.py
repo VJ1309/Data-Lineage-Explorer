@@ -52,3 +52,26 @@ def test_source_config_fields():
 def test_parse_warning_fields():
     w = ParseWarning(file="bad.py", error="SyntaxError: invalid syntax")
     assert "SyntaxError" in w.error
+
+
+def test_lineage_edge_has_qualified_field_defaulting_true():
+    e = LineageEdge(source_col="a.b", target_col="c.d", transform_type="passthrough")
+    assert e.qualified is True
+
+
+def test_lineage_edge_qualified_can_be_set_false():
+    e = LineageEdge(
+        source_col="a.b", target_col="c.d",
+        transform_type="passthrough", qualified=False,
+    )
+    assert e.qualified is False
+
+
+def test_parse_warning_default_severity_is_warn():
+    w = ParseWarning(file="x.sql", error="oops")
+    assert w.severity == "warn"
+
+
+def test_parse_warning_severity_can_be_error():
+    w = ParseWarning(file="x.sql", error="boom", severity="error")
+    assert w.severity == "error"
