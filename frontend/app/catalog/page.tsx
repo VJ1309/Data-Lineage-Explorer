@@ -51,7 +51,7 @@ function groupByRole(tables: TableSummary[]): Record<string, TableSummary[]> {
 
 function ColumnRow({ col, onLineage }: { col: ColumnMeta; onLineage: () => void }) {
   const [open, setOpen] = useState(false);
-  const hasExpr = !!col.expression;
+  const hasExpr = !!col.expression && col.transform_type !== "passthrough";
 
   return (
     <>
