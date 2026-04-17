@@ -7,20 +7,25 @@ from parsers.pyspark import parse_pyspark
 from parsers.notebook import parse_notebook
 
 
-def _parse_file(record: FileRecord) -> tuple[list[LineageEdge], list[ParseWarning]]:
+def _parse_file(
+    record: FileRecord,
+    raw_edges_out: list[LineageEdge] | None = None,
+) -> tuple[list[LineageEdge], list[ParseWarning]]:
     edges: list[LineageEdge] = []
     warnings: list[ParseWarning] = []
     sql_parse_errors: list[str] = []
     try:
         if record.type == "notebook":
             edges = parse_notebook(record.content, source_file=record.path,
-                                   _warnings=sql_parse_errors)
+                                   _warnings=sql_parse_errors, _raw_out=raw_edges_out)
         elif record.type == "python":
             edges = parse_pyspark(record.content, source_file=record.path,
                                   _warnings=sql_parse_errors)
+            if raw_edges_out is not None:
+                raw_edges_out.extend(edges)
         elif record.type == "sql":
             edges = parse_sql(record.content, source_file=record.path, source_line=1,
-                              _warnings=sql_parse_errors)
+                              _warnings=sql_parse_errors, _raw_out=raw_edges_out)
         else:
             warnings.append(ParseWarning(
                 file=record.path,
@@ -112,16 +117,23 @@ def build_graph_with_warnings(
     all_warnings: list[ParseWarning] = []
 
     all_edges: list[LineageEdge] = []
+    all_raw_edges: list[LineageEdge] = []
     for record in records:
-        edges, warnings = _parse_file(record)
+        edges, warnings = _parse_file(record, raw_edges_out=all_raw_edges)
         all_warnings.extend(warnings)
         all_edges.extend(edges)
 
     # Normalize identifiers: lowercase + resolve short table names
     all_edges = _normalize_edges(all_edges)
+    all_raw_edges = _normalize_edges(all_raw_edges)
 
     for edge in all_edges:
         graph.add_edge(edge.source_col, edge.target_col, data=edge)
+
+    raw_graph: nx.DiGraph = nx.DiGraph()
+    for edge in all_raw_edges:
+        raw_graph.add_edge(edge.source_col, edge.target_col, data=edge)
+    graph.graph["_raw_graph"] = raw_graph
 
     # Detect cycles and warn
     if not nx.is_directed_acyclic_graph(graph):

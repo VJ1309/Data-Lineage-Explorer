@@ -33,8 +33,8 @@ export function CodeInspector({ targetColId, edges }: Props) {
               selected === e ? "bg-accent text-accent-foreground" : "hover:bg-muted"
             }`}
           >
-            <div className="font-mono text-xs text-muted-foreground">{e.source_col.split(".")[0]}</div>
-            <div className="font-medium">{e.source_col.split(".")[1]}</div>
+            <div className="font-mono text-xs text-muted-foreground">{e.source_col.split(".").at(-2) ?? ""}</div>
+            <div className="font-medium">{e.source_col.split(".").at(-1) ?? e.source_col}</div>
             <TransformBadge type={e.transform_type} />
           </button>
         ))}

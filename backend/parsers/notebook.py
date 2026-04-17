@@ -26,6 +26,7 @@ def parse_notebook(
     content: str,
     source_file: str,
     _warnings: list[str] | None = None,
+    _raw_out: list[LineageEdge] | None = None,
 ) -> list[LineageEdge]:
     """Parse a Jupyter notebook JSON string and return all lineage edges."""
     try:
@@ -67,4 +68,6 @@ def parse_notebook(
 
         edges.extend(cell_edges)
 
+    if _raw_out is not None:
+        _raw_out.extend(edges)
     return _resolve_temp_views(edges, temp_views)

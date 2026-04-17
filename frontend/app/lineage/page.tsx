@@ -2,16 +2,18 @@
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useLineage } from "@/lib/hooks";
+import { useLineage, usePaths } from "@/lib/hooks";
 import { LineageGraph } from "@/components/lineage-graph";
 import { LineageTree } from "@/components/lineage-tree";
 import { CodeInspector } from "@/components/code-inspector";
+import { PathInspector } from "@/components/path-inspector";
 
 function LineageContent() {
   const params = useSearchParams();
   const table = params.get("table");
   const column = params.get("column");
   const { data, isLoading, error } = useLineage(table, column);
+  const { data: pathsData, isLoading: pathsLoading } = usePaths(table, column);
 
   if (!table || !column) {
     return (
@@ -41,6 +43,7 @@ function LineageContent() {
           <TabsTrigger value="graph">⬡ Graph</TabsTrigger>
           <TabsTrigger value="tree">≡ Tree</TabsTrigger>
           <TabsTrigger value="code">&lt;/&gt; Code</TabsTrigger>
+          <TabsTrigger value="path">⇢ Path</TabsTrigger>
         </TabsList>
 
         <TabsContent value="graph" className="pt-4">
@@ -57,6 +60,13 @@ function LineageContent() {
 
         <TabsContent value="code" className="pt-4">
           <CodeInspector targetColId={data.target} edges={data.upstream} />
+        </TabsContent>
+
+        <TabsContent value="path" className="pt-4">
+          {pathsLoading && <p className="text-sm text-muted-foreground">Loading paths…</p>}
+          {pathsData && (
+            <PathInspector paths={pathsData.paths} truncated={pathsData.truncated} />
+          )}
         </TabsContent>
       </Tabs>
     </div>

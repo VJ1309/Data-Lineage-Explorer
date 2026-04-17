@@ -71,6 +71,26 @@ export type Warning = {
   error: string;
 };
 
+export type PathStep = {
+  source_col: string;
+  target_col: string;
+  transform_type: string | null;
+  expression: string | null;
+  source_file: string | null;
+  source_cell: number | null;
+  source_line: number | null;
+};
+
+export type LineagePath = {
+  steps: PathStep[];
+};
+
+export type PathsResponse = {
+  target: string;
+  paths: LineagePath[];
+  truncated: boolean;
+};
+
 // ── API functions ─────────────────────────────────────────────────────────
 
 export const api = {
@@ -103,6 +123,10 @@ export const api = {
   lineage: (table: string, column: string) =>
     apiFetch<LineageResponse>(
       `/lineage?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`
+    ),
+  paths: (table: string, column: string) =>
+    apiFetch<PathsResponse>(
+      `/lineage/paths?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`
     ),
   impact: (table: string, column: string) =>
     apiFetch<ImpactResponse>(

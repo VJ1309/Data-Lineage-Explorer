@@ -540,6 +540,7 @@ def parse_sql(
     source_cell: int | None = None,
     _resolve_views: bool = True,
     _warnings: list[str] | None = None,
+    _raw_out: list[LineageEdge] | None = None,
 ) -> list[LineageEdge]:
     """Parse SQL (single or multi-statement) and return column-level lineage edges.
 
@@ -559,6 +560,8 @@ def parse_sql(
                           source_cell=cell_idx, _resolve_views=False,
                           _warnings=_warnings)
             )
+        if _raw_out is not None:
+            _raw_out.extend(edges)
         return _resolve_temp_views(edges, temp_views)
 
     try:
@@ -578,6 +581,8 @@ def parse_sql(
         edges.extend(
             _parse_single_statement(statement, source_file, source_line, source_cell)
         )
+    if _raw_out is not None:
+        _raw_out.extend(edges)
     if _resolve_views and temp_views:
         return _resolve_temp_views(edges, temp_views)
     return edges
