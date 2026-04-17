@@ -527,6 +527,39 @@ def test_temp_view_wildcard_chain_two_hops():
     assert "real_table.*" in sources, "must resolve two-hop wildcard chain to real_table"
 
 
+def test_unqualified_column_in_join_is_marked_unqualified():
+    """Ambiguous bare column in a multi-source SELECT must set qualified=False."""
+    sql = """
+    INSERT INTO result
+    SELECT id FROM table_a JOIN table_b ON table_a.id = table_b.id
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    result_edges = [e for e in edges if e.target_col == "result.id"]
+    assert result_edges, "should emit at least one edge for result.id"
+    assert all(e.qualified is False for e in result_edges), (
+        "ambiguous column in JOIN must be flagged qualified=False"
+    )
+
+
+def test_qualified_column_in_join_stays_qualified():
+    """Explicit table.col reference in a JOIN must stay qualified=True."""
+    sql = """
+    INSERT INTO result
+    SELECT table_a.id FROM table_a JOIN table_b ON table_a.id = table_b.id
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.id")
+    assert e.qualified is True
+
+
+def test_single_source_unqualified_column_stays_qualified():
+    """Unqualified column against a single FROM is unambiguous — keep qualified=True."""
+    sql = "INSERT INTO result SELECT id FROM only_table"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.id")
+    assert e.qualified is True
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []
@@ -539,3 +572,5 @@ def test_bad_sql_collects_warning():
     assert edges == []
     assert len(warnings_list) == 1
     assert warnings_list[0]  # non-empty error message
+
+

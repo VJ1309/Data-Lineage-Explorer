@@ -228,6 +228,7 @@ def _parse_select_node(
                               subquery_aliases=subquery_aliases)
 
     default_table = source_tables[0] if source_tables else "unknown"
+    multi_source = len(source_tables) > 1
 
     def _resolve_table_hint(hint: str) -> tuple[str, bool]:
         """Resolve a table alias/name. Returns (resolved_table, is_certain)."""
@@ -268,8 +269,10 @@ def _parse_select_node(
                         continue
                     if table_hint:
                         resolved_table, certain = _resolve_table_hint(table_hint)
+                        qualified = True
                     else:
                         resolved_table, certain = default_table, True
+                        qualified = not multi_source
                     edges.append(LineageEdge(
                         source_col=f"{resolved_table}.{col_name}",
                         target_col=target_col,
@@ -278,7 +281,8 @@ def _parse_select_node(
                         source_file=source_file,
                         source_cell=source_cell,
                         source_line=source_line,
-                        confidence="certain" if certain else "approximate",
+                        confidence="certain" if certain and qualified else "approximate",
+                        qualified=qualified,
                     ))
             else:
                 edges.append(LineageEdge(
@@ -315,8 +319,10 @@ def _parse_select_node(
                 continue
             if table_hint:
                 resolved_table, certain = _resolve_table_hint(table_hint)
+                qualified = True
             else:
                 resolved_table, certain = default_table, True
+                qualified = not multi_source
             source_col = f"{resolved_table}.{col_name}"
             edges.append(LineageEdge(
                 source_col=source_col,
@@ -326,7 +332,8 @@ def _parse_select_node(
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
-                confidence="certain" if certain else "approximate",
+                confidence="certain" if certain and qualified else "approximate",
+                qualified=qualified,
             ))
 
     return edges
