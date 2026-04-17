@@ -38,14 +38,22 @@ def _parse_file(
     return edges, warnings
 
 
-def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
+def _normalize_edges(
+    edges: list[LineageEdge],
+) -> tuple[list[LineageEdge], list[str]]:
     """Normalize edge identifiers: lowercase + resolve short table names to full form.
 
     In Databricks/Unity Catalog, the same table can be referenced as:
       - catalog.schema.table  (full 3-part name)
       - schema.table          (2-part, when catalog is implicit)
       - table                 (1-part, when both are implicit)
-    This merges them to the longest known form.
+    This merges them to the longest known form ONLY when the short name
+    maps unambiguously to a single qualified form. If a short name could
+    refer to two different fully-qualified tables (e.g. both
+    staging.orders and prod.orders), it is left as-is and the ambiguous
+    name is returned so the caller can surface a warning.
+
+    Returns (normalized_edges, ambiguous_names).
     """
     # Step 1: Collect all unique table names (lowercased)
     table_names: set[str] = set()
@@ -57,18 +65,23 @@ def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
         if "." in tgt:
             table_names.add(tgt.rsplit(".", 1)[0])
 
-    # Step 2: Build a mapping from short names to their longest matching form
-    # e.g., "delv.cst_tpt_trn" -> "uc_dc_delv.delv.cst_tpt_trn"
+    # Step 2: Build a mapping from short names to their longest matching form.
+    # Only merge when there is exactly one candidate; otherwise record as ambiguous.
     short_to_long: dict[str, str] = {}
+    ambiguous: set[str] = set()
     sorted_names = sorted(table_names, key=lambda n: n.count("."), reverse=True)
     for name in sorted_names:
-        for longer in sorted_names:
-            if longer == name:
-                continue
-            # Check if 'name' is a suffix of 'longer' at a dot boundary
-            if longer.endswith("." + name):
-                short_to_long[name] = short_to_long.get(longer, longer)
-                break
+        candidates = [
+            longer for longer in sorted_names
+            if longer != name and longer.endswith("." + name)
+        ]
+        if len(candidates) == 1:
+            cand = candidates[0]
+            short_to_long[name] = short_to_long.get(cand, cand)
+        elif len(candidates) > 1:
+            ambiguous.add(name)
+
+    ambiguous_list = sorted(ambiguous)
 
     if not short_to_long:
         # Only case normalization needed
@@ -83,8 +96,9 @@ def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
                 source_cell=e.source_cell,
                 source_line=e.source_line,
                 confidence=e.confidence,
+                qualified=e.qualified,
             ))
-        return normalized
+        return normalized, ambiguous_list
 
     def _resolve_col(col_id: str) -> str:
         col_lower = col_id.lower()
@@ -105,8 +119,9 @@ def _normalize_edges(edges: list[LineageEdge]) -> list[LineageEdge]:
             source_cell=e.source_cell,
             source_line=e.source_line,
             confidence=e.confidence,
+            qualified=e.qualified,
         ))
-    return normalized
+    return normalized, ambiguous_list
 
 
 def build_graph_with_warnings(
@@ -124,8 +139,17 @@ def build_graph_with_warnings(
         all_edges.extend(edges)
 
     # Normalize identifiers: lowercase + resolve short table names
-    all_edges = _normalize_edges(all_edges)
-    all_raw_edges = _normalize_edges(all_raw_edges)
+    all_edges, ambiguous = _normalize_edges(all_edges)
+    all_raw_edges, _ = _normalize_edges(all_raw_edges)
+    for amb in ambiguous:
+        all_warnings.append(ParseWarning(
+            file="<graph>",
+            error=(
+                f"ambiguous table name {amb!r} matches multiple qualified tables — "
+                f"leaving as-is; qualify references to disambiguate"
+            ),
+            severity="warn",
+        ))
 
     for edge in all_edges:
         graph.add_edge(edge.source_col, edge.target_col, data=edge)

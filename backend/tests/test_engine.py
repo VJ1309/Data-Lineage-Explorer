@@ -75,3 +75,35 @@ def test_sql_parse_error_surfaces_as_warning():
     assert any("bad.sql" in w.file for w in warnings), (
         "parse error in bad.sql must produce a ParseWarning"
     )
+
+
+def test_ambiguous_short_name_not_merged_and_warns():
+    """If 'orders' matches both 'staging.orders' and 'prod.orders', do not merge — warn."""
+    content = """
+    INSERT INTO staging.orders SELECT id FROM raw_source;
+    INSERT INTO prod.orders SELECT id FROM raw_other;
+    INSERT INTO downstream SELECT id FROM orders;
+    """
+    rec = FileRecord(path="f.sql", content=content, type="sql", source_ref="t")
+    graph, warnings = build_graph_with_warnings([rec])
+    nodes = set(graph.nodes())
+    # Both fully-qualified forms must survive as distinct nodes
+    assert "staging.orders.id" in nodes, f"staging.orders merged away; nodes={sorted(nodes)}"
+    assert "prod.orders.id" in nodes, f"prod.orders merged away; nodes={sorted(nodes)}"
+    assert any("ambiguous" in w.error.lower() for w in warnings), (
+        f"expected ambiguity warning; got {[w.error for w in warnings]}"
+    )
+
+
+def test_unambiguous_short_name_still_merges():
+    """If 'orders' appears only as 'uc.prod.orders', still merge the short form."""
+    content = """
+    INSERT INTO uc.prod.orders SELECT id FROM raw_source;
+    INSERT INTO downstream SELECT id FROM orders;
+    """
+    rec = FileRecord(path="f.sql", content=content, type="sql", source_ref="t")
+    graph, warnings = build_graph_with_warnings([rec])
+    nodes = set(graph.nodes())
+    # 'orders.id' short form should have been merged into 'uc.prod.orders.id'
+    assert "uc.prod.orders.id" in nodes
+    assert "orders.id" not in nodes, f"short name not merged when unambiguous; nodes={sorted(nodes)}"
