@@ -399,8 +399,16 @@ def _resolve_temp_views(
                             seen.add(v)
                             result.append(v)
             return result if result else None
-        # Named column — fall back to wildcard entry (temp view used SELECT *)
-        return tv_sources.get(f"{src_tbl}.*")
+        # Named column — fall back to wildcard entry but substitute the column name.
+        # e.g. lookup("FULL_SRC_RNK.SRC_SYS_CD") w/ wildcard → ["real_tbl.SRC_SYS_CD"]
+        wildcard_sources = tv_sources.get(f"{src_tbl}.*")
+        if wildcard_sources is None:
+            return None
+        col_name = src.rsplit(".", 1)[-1]
+        return [
+            (s[:-1] + col_name if s.endswith(".*") else s)
+            for s in wildcard_sources
+        ]
 
     # Resolve chains iteratively until stable
     max_iterations = len(temp_views) + 1
@@ -432,6 +440,32 @@ def _resolve_temp_views(
             continue
 
         if src_tbl in temp_views:
+            # Wildcard source → wildcard target: emit per-column edges using tv_sources.
+            # e.g. SRC_MATCH_RNK.* → ship_ordr_mlstn.* becomes
+            #      upstream_of(SRC_MATCH_RNK.col) → ship_ordr_mlstn.col for each named col.
+            if e.source_col.endswith(".*") and e.target_col.endswith(".*"):
+                tgt_base = e.target_col[:-2]  # strip ".*"
+                seen_per_col: set[tuple[str, str]] = set()
+                for tv_key, tv_vals in tv_sources.items():
+                    tv_key_tbl = tv_key.rsplit(".", 1)[0] if "." in tv_key else ""
+                    if tv_key_tbl == src_tbl and not tv_key.endswith(".*"):
+                        col_name = tv_key.rsplit(".", 1)[-1]
+                        tgt_col = f"{tgt_base}.{col_name}"
+                        for upcol in tv_vals:
+                            key = (upcol, tgt_col)
+                            if key not in seen_per_col:
+                                seen_per_col.add(key)
+                                resolved.append(LineageEdge(
+                                    source_col=upcol,
+                                    target_col=tgt_col,
+                                    transform_type=e.transform_type,
+                                    expression=e.expression,
+                                    source_file=e.source_file,
+                                    source_cell=e.source_cell,
+                                    source_line=e.source_line,
+                                    confidence=e.confidence,
+                                ))
+            # Always also resolve the wildcard edge itself (preserves the * row in UI).
             upstream_cols = _lookup(e.source_col)
             if upstream_cols:
                 seen_up: set[str] = set()
