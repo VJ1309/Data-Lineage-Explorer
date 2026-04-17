@@ -32,44 +32,59 @@ def _classify_transform(node: exp.Expression) -> tuple[str, str | None]:
     return "passthrough", expr_str
 
 
-def _resolve_ctes(statement: exp.Expression) -> dict[str, str]:
-    """Build map of CTE alias -> source table name (best-effort, single-source CTEs).
+def _resolve_ctes(
+    statement: exp.Expression,
+) -> tuple[dict[str, str], dict[str, list[exp.Select]]]:
+    """Build CTE resolution maps.
 
-    Resolves chains: if cte2 references cte1, cte2 maps to cte1's source.
-    Multi-source CTEs (JOINs) are omitted; _resolve_table_hint falls back gracefully.
+    Returns:
+        simple_map  – alias → single physical source table (single-FROM CTEs)
+        multi_map   – alias → [Select nodes] for CTEs that contain JOINs
+
+    Chains in simple_map are resolved (cte2 → cte1 → actual_table).
+    Multi-source CTEs are returned as parsed Select bodies so the caller can
+    treat them like inline subqueries via _resolve_temp_views.
     """
-    cte_map: dict[str, str] = {}
+    simple_map: dict[str, str] = {}
+    multi_map: dict[str, list[exp.Select]] = {}
+
     with_clause = statement.args.get("with_")
     if not with_clause:
-        # For CREATE TABLE/VIEW AS WITH ... SELECT ..., SQLGlot attaches the WITH
-        # clause to the inner SELECT body, not the outer CREATE/INSERT wrapper.
+        # For CREATE TABLE/VIEW AS WITH ... SELECT ..., SQLGlot attaches the
+        # WITH clause to the inner SELECT body, not the outer wrapper.
         body = statement.args.get("expression")
         if body is not None:
             with_clause = body.args.get("with_")
     if not with_clause:
-        return cte_map
+        return simple_map, multi_map
+
     for cte in with_clause.expressions:
         alias = cte.alias
         cte_select = cte.this
-        # SQLGlot uses 'from_' as the arg key for FROM clause
         from_clause = cte_select.args.get("from_")
-        if from_clause:
+        has_join = bool(cte_select.args.get("joins"))
+
+        if not has_join and from_clause:
             table_expr = from_clause.this
             if isinstance(table_expr, exp.Table):
-                cte_map[alias] = _qualified_table_name(table_expr)
+                simple_map[alias] = _qualified_table_name(table_expr)
+        elif has_join:
+            select_nodes = _collect_union_selects(cte_select)
+            if select_nodes:
+                multi_map[alias] = select_nodes
 
     # Resolve chains: cte2 -> cte1 -> actual_table
-    max_iterations = len(cte_map) + 1
+    max_iterations = len(simple_map) + 1
     for _ in range(max_iterations):
         changed = False
-        for alias, target in list(cte_map.items()):
-            if target in cte_map:
-                cte_map[alias] = cte_map[target]
+        for alias, target in list(simple_map.items()):
+            if target in simple_map:
+                simple_map[alias] = simple_map[target]
                 changed = True
         if not changed:
             break
 
-    return cte_map
+    return simple_map, multi_map
 
 
 def _qualified_table_name(table: exp.Table) -> str:
@@ -334,10 +349,22 @@ def _parse_single_statement(
     if not select_nodes:
         return []
 
-    cte_map = _resolve_ctes(statement)
+    cte_map, multi_cte_bodies = _resolve_ctes(statement)
     target_table = _find_target_table(statement)
     subquery_aliases: set[str] = set()
     edges: list[LineageEdge] = []
+
+    # Parse multi-source (JOINed) CTEs as virtual subqueries so _resolve_temp_views
+    # can short-circuit them just like inline subqueries / temp views.
+    for cte_alias, cte_selects in multi_cte_bodies.items():
+        subquery_aliases.add(cte_alias)
+        for cte_sel in cte_selects:
+            edges.extend(_parse_select_node(
+                cte_sel, cte_alias, cte_map,
+                source_file, source_line, source_cell,
+                subquery_aliases=subquery_aliases,
+            ))
+
     for select_node in select_nodes:
         edges.extend(_parse_select_node(
             select_node, target_table, cte_map,

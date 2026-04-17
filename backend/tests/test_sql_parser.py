@@ -274,6 +274,31 @@ def test_multi_table_cte_no_phantom_table():
     assert "final_table.val" in targets
 
 
+def test_multi_table_cte_correct_source_attribution():
+    """Joined CTE columns must trace back to the correct source tables.
+
+    Previously all columns from a multi-source CTE were attributed to the first
+    FROM table. After the fix, explicit table aliases (a.id → table_a, b.val →
+    table_b) must be preserved through CTE resolution.
+    """
+    sql = """
+    WITH joined AS (
+        SELECT a.id, b.val
+        FROM table_a a
+        JOIN table_b b ON a.id = b.id
+    )
+    INSERT INTO final_table
+    SELECT id, val FROM joined
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "table_a.id" in sources, f"Expected table_a.id in sources: {sources}"
+    assert "table_b.val" in sources, f"Expected table_b.val in sources: {sources}"
+    assert "final_table.id" in targets
+    assert "final_table.val" in targets
+
+
 def test_struct_field_fallback_is_approximate():
     """Struct field access falling back to default_table must produce an approximate edge.
 
