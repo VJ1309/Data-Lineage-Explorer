@@ -527,6 +527,22 @@ def test_temp_view_wildcard_chain_two_hops():
     assert "real_table.*" in sources, "must resolve two-hop wildcard chain to real_table"
 
 
+def test_one_bad_statement_does_not_drop_good_statements():
+    """A single malformed statement must not lose the surrounding good ones."""
+    sql = """
+    INSERT INTO good_table SELECT id FROM source_table;
+    THIS IS NOT VALID SQL !!!###;
+    INSERT INTO other_good SELECT name FROM source_table2;
+    """
+    warnings_list: list[str] = []
+    edges = parse_sql(sql, source_file="mixed.sql", source_line=1,
+                     _warnings=warnings_list)
+    targets = {e.target_col for e in edges}
+    assert "good_table.id" in targets, "first good statement lost"
+    assert "other_good.name" in targets, "third good statement lost"
+    assert warnings_list, "bad statement must surface a warning"
+
+
 def test_unqualified_column_in_join_is_marked_unqualified():
     """Ambiguous bare column in a multi-source SELECT must set qualified=False."""
     sql = """

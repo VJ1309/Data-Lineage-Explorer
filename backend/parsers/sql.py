@@ -2,7 +2,34 @@
 from __future__ import annotations
 import sqlglot
 import sqlglot.expressions as exp
+from sqlglot import tokens
 from lineage.models import LineageEdge
+
+
+def _split_top_level_statements(sql: str) -> list[str]:
+    """Split SQL on top-level ';' using SQLGlot's tokenizer (respects strings/comments).
+
+    Returns the original string unchanged if tokenisation fails, so a single
+    malformed statement still goes to the per-statement parse path and surfaces
+    a proper parse error instead of being dropped silently.
+    """
+    try:
+        toks = list(tokens.Tokenizer().tokenize(sql))
+    except Exception:
+        return [sql] if sql.strip() else []
+    parts: list[str] = []
+    start = 0
+    for tok in toks:
+        if tok.token_type == tokens.TokenType.SEMICOLON:
+            # tok.start/end are inclusive char offsets
+            chunk = sql[start:tok.start]
+            if chunk.strip():
+                parts.append(chunk)
+            start = tok.end + 1
+    tail = sql[start:]
+    if tail.strip():
+        parts.append(tail)
+    return parts
 
 
 def _classify_transform(node: exp.Expression) -> tuple[str, str | None]:
@@ -598,12 +625,17 @@ def parse_sql(
             _raw_out.extend(edges)
         return _resolve_temp_views(edges, temp_views)
 
-    try:
-        statements = sqlglot.parse(sql, dialect="databricks")
-    except Exception as exc:
-        if _warnings is not None:
-            _warnings.append(str(exc))
-        return []
+    statements: list[exp.Expression] = []
+    for stmt_sql in _split_top_level_statements(sql):
+        try:
+            parsed = sqlglot.parse_one(stmt_sql, dialect="databricks")
+        except Exception as exc:
+            if _warnings is not None:
+                preview = stmt_sql.strip().splitlines()[0][:80]
+                _warnings.append(f"{exc} (near: {preview!r})")
+            continue
+        if parsed is not None:
+            statements.append(parsed)
 
     temp_views: set[str] = set()
     edges: list[LineageEdge] = []
