@@ -193,6 +193,31 @@ def _process_subquery(
             subquery_aliases=subquery_aliases,
         ))
 
+    # PIVOT: emit synthetic aggregation edges sub_alias.agg_col → sub_alias.pivot_out_col
+    # so that temp-view resolution chains source → aggregated col → pivot output.
+    for pivot in (subq.args.get("pivots") or []):
+        if not isinstance(pivot, exp.Pivot):
+            continue
+        agg_cols: list[str] = []
+        for agg_fn in (pivot.args.get("expressions") or []):
+            for col in agg_fn.find_all(exp.Column):
+                if col.name:
+                    agg_cols.append(col.name)
+        out_cols = [c.name for c in (pivot.args.get("columns") or []) if c.name]
+        for out_col in out_cols:
+            for agg_col in agg_cols:
+                edges.append(LineageEdge(
+                    source_col=f"{sub_alias}.{agg_col}",
+                    target_col=f"{sub_alias}.{out_col}",
+                    transform_type="aggregation",
+                    expression=pivot.sql(dialect="databricks"),
+                    source_file=source_file,
+                    source_cell=source_cell,
+                    source_line=source_line,
+                    confidence="certain",
+                    qualified=True,
+                ))
+
 
 def _get_statement_body(statement: exp.Expression) -> exp.Expression | None:
     """Return the query body (SELECT or UNION) stripping INSERT/CREATE wrapper."""

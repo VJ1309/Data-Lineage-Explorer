@@ -642,6 +642,24 @@ def test_lateral_view_posexplode_links_both_columns():
     )
 
 
+def test_pivot_output_columns_trace_to_aggregated_source():
+    """PIVOT SUM(amount) FOR category IN ('A' AS cat_a) — cat_a/cat_b must exist and trace to sales.amount."""
+    sql = """
+    INSERT INTO result
+    SELECT cat_a, cat_b FROM (SELECT year, amount, category FROM sales) p
+    PIVOT (SUM(amount) FOR category IN ('A' AS cat_a, 'B' AS cat_b))
+    """
+    edges = parse_sql(sql, source_file="p.sql", source_line=1)
+    cat_a_sources = {e.source_col for e in edges if e.target_col == "result.cat_a"}
+    cat_b_sources = {e.source_col for e in edges if e.target_col == "result.cat_b"}
+    assert "sales.amount" in cat_a_sources, (
+        f"result.cat_a must trace to sales.amount; got {cat_a_sources}"
+    )
+    assert "sales.amount" in cat_b_sources, (
+        f"result.cat_b must trace to sales.amount; got {cat_b_sources}"
+    )
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []
