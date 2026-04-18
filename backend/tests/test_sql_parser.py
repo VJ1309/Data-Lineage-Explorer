@@ -660,6 +660,29 @@ def test_pivot_output_columns_trace_to_aggregated_source():
     )
 
 
+def test_where_clause_emits_filter_edges():
+    """WHERE active = 1 AND region = 'US' must emit filter edges to target.__filter__."""
+    sql = """
+    INSERT INTO result
+    SELECT id FROM users WHERE active = 1 AND region = 'US'
+    """
+    edges = parse_sql(sql, source_file="w.sql", source_line=1)
+    filter_edges = [e for e in edges if e.target_col == "result.__filter__"]
+    assert filter_edges, f"no filter edges emitted; edges={[(e.source_col, e.target_col, e.transform_type) for e in edges]}"
+    sources = {e.source_col for e in filter_edges}
+    assert "users.active" in sources, f"missing users.active in filter sources; got {sources}"
+    assert "users.region" in sources, f"missing users.region in filter sources; got {sources}"
+    for e in filter_edges:
+        assert e.transform_type == "filter", f"filter edges must have transform_type=filter; got {e.transform_type}"
+
+
+def test_where_clause_without_columns_emits_no_filter_edge():
+    """WHERE 1 = 1 (no column refs) must not emit phantom filter edges."""
+    sql = "INSERT INTO result SELECT id FROM users WHERE 1 = 1"
+    edges = parse_sql(sql, source_file="w.sql", source_line=1)
+    assert not any(e.target_col == "result.__filter__" for e in edges)
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []

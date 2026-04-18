@@ -335,6 +335,40 @@ def _parse_select_node(
                 return tbl, True
         return default_table, False
 
+    # WHERE → __filter__ edges. Emit one edge per distinct column reference
+    # in the predicate to target.__filter__ so consumers can see which columns
+    # gated the row selection (predicate lineage, not column lineage).
+    where_clause = select_node.args.get("where")
+    if where_clause is not None:
+        filter_expr_str = where_clause.sql(dialect="databricks")
+        seen_filter_src: set[str] = set()
+        for col_ref in where_clause.find_all(exp.Column):
+            col_name = col_ref.name
+            if not col_name:
+                continue
+            table_hint = col_ref.table
+            if table_hint:
+                resolved_table, _certain = _resolve_table_hint(table_hint)
+                qualified = True
+            else:
+                resolved_table = default_table
+                qualified = not multi_source
+            src = f"{resolved_table}.{col_name}"
+            if src in seen_filter_src:
+                continue
+            seen_filter_src.add(src)
+            edges.append(LineageEdge(
+                source_col=src,
+                target_col=f"{target_table}.__filter__",
+                transform_type="filter",
+                expression=filter_expr_str,
+                source_file=source_file,
+                source_cell=source_cell,
+                source_line=source_line,
+                confidence="certain" if qualified else "approximate",
+                qualified=qualified,
+            ))
+
     # Walk SELECT expressions
     for sel in select_node.selects:
         if isinstance(sel, exp.Alias):
