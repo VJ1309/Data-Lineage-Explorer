@@ -33,6 +33,14 @@ export function useRegisterSource() {
   });
 }
 
+export function useSourceFiles(sourceId: string | null) {
+  return useQuery({
+    queryKey: ["source-files", sourceId],
+    queryFn: () => api.sources.files(sourceId!),
+    enabled: sourceId !== null,
+  });
+}
+
 export function useTables() {
   return useQuery({ queryKey: ["tables"], queryFn: api.tables.list });
 }

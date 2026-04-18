@@ -142,6 +142,30 @@ def delete_source(source_id: str):
     return {"ok": True}
 
 
+@router.get("/sources/{source_id}/files")
+def list_source_files(source_id: str):
+    if source_id not in state.source_registry:
+        raise HTTPException(status_code=404, detail="Source not found")
+    entry = state.source_registry[source_id]
+    file_stats: dict = entry.get("_file_stats", {})
+    error_files: set = entry.get("_error_files", set())
+
+    result = []
+    for fname, stats in sorted(file_stats.items()):
+        if fname in error_files:
+            confidence = "low"
+        elif stats.get("approximate_count", 0) > 0 or stats.get("warning_count", 0) > 0:
+            confidence = "medium"
+        else:
+            confidence = "high"
+        result.append({
+            "file": fname,
+            "edge_count": stats["edge_count"],
+            "confidence": confidence,
+        })
+    return result
+
+
 @router.post("/sources/{source_id}/refresh")
 def refresh_source(source_id: str):
     if source_id not in state.source_registry:
@@ -205,12 +229,29 @@ def refresh_source(source_id: str):
         for w in new_warnings
     )
 
-    # Track which files this source contributed
-    entry["_parsed_files"] = {
-        d["data"].source_file
-        for _, _, d in new_graph.edges(data=True)
-        if d.get("data") and d["data"].source_file
-    }
+    # Track per-file stats for confidence rating
+    file_stats: dict[str, dict] = {}
+    for _, _, d in new_graph.edges(data=True):
+        if d.get("data") and d["data"].source_file:
+            fname = d["data"].source_file
+            if fname not in file_stats:
+                file_stats[fname] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
+            file_stats[fname]["edge_count"] += 1
+            if d["data"].confidence == "approximate":
+                file_stats[fname]["approximate_count"] += 1
+
+    error_files: set[str] = set()
+    for w in new_warnings:
+        if w.file:
+            if w.file not in file_stats:
+                file_stats[w.file] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
+            file_stats[w.file]["warning_count"] += 1
+            if w.severity == "error":
+                error_files.add(w.file)
+
+    entry["_parsed_files"] = set(file_stats.keys())
+    entry["_file_stats"] = file_stats
+    entry["_error_files"] = error_files
 
     entry["status"] = "parsed"
     entry["file_count"] = len(records)

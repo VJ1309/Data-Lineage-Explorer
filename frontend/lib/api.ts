@@ -17,6 +17,13 @@ export type Source = {
   url: string;
   status: string;
   file_count: number;
+  warning_count: number;
+};
+
+export type SourceFile = {
+  file: string;
+  edge_count: number;
+  confidence: "high" | "medium" | "low";
 };
 
 export type TableSummary = {
@@ -109,6 +116,7 @@ export type PathsResponse = {
 export const api = {
   sources: {
     list: () => apiFetch<Source[]>("/sources"),
+    files: (id: string) => apiFetch<SourceFile[]>(`/sources/${id}/files`),
     delete: (id: string) =>
       apiFetch<{ ok: boolean }>(`/sources/${id}`, { method: "DELETE" }),
     refresh: (id: string) =>
