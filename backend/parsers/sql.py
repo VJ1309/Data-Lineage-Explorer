@@ -87,18 +87,22 @@ def _resolve_ctes(
 
     for cte in with_clause.expressions:
         alias = cte.alias
-        cte_select = cte.this
-        from_clause = cte_select.args.get("from_")
-        has_join = bool(cte_select.args.get("joins"))
+        cte_body = cte.this
+        # cte_body is a Select for simple CTEs, or a Union/Except/Intersect for set ops
+        is_select = isinstance(cte_body, exp.Select)
+        from_clause = cte_body.args.get("from_") if is_select else None
+        has_join = bool(cte_body.args.get("joins")) if is_select else False
 
-        if not has_join and from_clause:
+        if is_select and not has_join and from_clause:
             table_expr = from_clause.this
             if isinstance(table_expr, exp.Table):
                 simple_map[alias] = _qualified_table_name(table_expr)
-        elif has_join:
-            select_nodes = _collect_union_selects(cte_select)
-            if select_nodes:
-                multi_map[alias] = select_nodes
+                continue
+
+        # Multi-source: JOINed SELECT, UNION ALL/EXCEPT/INTERSECT, or FROM-subquery
+        select_nodes = _collect_union_selects(cte_body)
+        if select_nodes:
+            multi_map[alias] = select_nodes
 
     # Resolve chains: cte2 -> cte1 -> actual_table
     max_iterations = len(simple_map) + 1
@@ -702,12 +706,18 @@ def _resolve_temp_views(
     if not temp_views:
         return edges
 
-    # Build full map of temp_view.col -> upstream sources
+    # Normalize temp_views to lowercase — Databricks identifiers are case-insensitive
+    # and SQL notebooks frequently mix cases across cells (CREATE VIEW uses lowercase
+    # SQLGlot normalization; SELECT statements may reference columns in UPPERCASE).
+    temp_views_lower = {v.lower() for v in temp_views}
+
+    # Build full map of temp_view.col -> upstream sources (all keys lowercased)
     tv_sources: dict[str, list[str]] = {}
     for e in edges:
-        tbl = e.target_col.rsplit(".", 1)[0] if "." in e.target_col else ""
-        if tbl in temp_views:
-            tv_sources.setdefault(e.target_col, []).append(e.source_col)
+        tbl = e.target_col.lower().rsplit(".", 1)[0] if "." in e.target_col else ""
+        if tbl in temp_views_lower:
+            key = e.target_col.lower()
+            tv_sources.setdefault(key, []).append(e.source_col.lower())
 
     def _lookup(src: str) -> list[str] | None:
         """Return upstream sources for a temp view column with wildcard fallback.
@@ -717,6 +727,7 @@ def _resolve_temp_views(
         - Named source not found: fall back to the tbl.* wildcard entry.
         Returns None when no upstream can be found.
         """
+        src = src.lower()
         if src in tv_sources:
             return tv_sources[src]
         src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
@@ -745,14 +756,14 @@ def _resolve_temp_views(
         ]
 
     # Resolve chains iteratively until stable
-    max_iterations = len(temp_views) + 1
+    max_iterations = len(temp_views_lower) + 1
     for _ in range(max_iterations):
         changed = False
         for tv_col, sources in tv_sources.items():
             expanded: list[str] = []
             for src in sources:
                 src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
-                if src_tbl in temp_views:
+                if src_tbl in temp_views_lower:
                     upstream = _lookup(src)
                     if upstream is not None:
                         expanded.extend(upstream)
@@ -767,13 +778,13 @@ def _resolve_temp_views(
 
     resolved: list[LineageEdge] = []
     for e in edges:
-        src_tbl = e.source_col.rsplit(".", 1)[0] if "." in e.source_col else ""
-        tgt_tbl = e.target_col.rsplit(".", 1)[0] if "." in e.target_col else ""
+        src_tbl = e.source_col.lower().rsplit(".", 1)[0] if "." in e.source_col else ""
+        tgt_tbl = e.target_col.lower().rsplit(".", 1)[0] if "." in e.target_col else ""
 
-        if tgt_tbl in temp_views:
+        if tgt_tbl in temp_views_lower:
             continue
 
-        if src_tbl in temp_views:
+        if src_tbl in temp_views_lower:
             # Wildcard source → wildcard target: emit per-column edges using tv_sources.
             # e.g. SRC_MATCH_RNK.* → ship_ordr_mlstn.* becomes
             #      upstream_of(SRC_MATCH_RNK.col) → ship_ordr_mlstn.col for each named col.
@@ -782,7 +793,7 @@ def _resolve_temp_views(
                 seen_per_col: set[tuple[str, str]] = set()
                 for tv_key, tv_vals in tv_sources.items():
                     tv_key_tbl = tv_key.rsplit(".", 1)[0] if "." in tv_key else ""
-                    if tv_key_tbl == src_tbl and not tv_key.endswith(".*"):
+                    if tv_key_tbl == src_tbl.lower() and not tv_key.endswith(".*"):
                         col_name = tv_key.rsplit(".", 1)[-1]
                         tgt_col = f"{tgt_base}.{col_name}"
                         for upcol in tv_vals:

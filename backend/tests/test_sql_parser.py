@@ -706,6 +706,68 @@ def test_join_without_on_clause_emits_no_joinkey():
     assert not any(e.target_col == "result.__joinkey__" for e in edges)
 
 
+def test_cte_with_union_all_resolves_to_real_sources():
+    """CTE whose body is a UNION ALL must not leak as a phantom source.
+
+    _resolve_ctes previously only handled single-FROM (simple_map) and JOINed CTEs
+    (multi_map). UNION ALL CTEs fell into neither bucket and their alias leaked.
+    """
+    sql = """
+    WITH na_pos_non_calc AS (
+        SELECT id, val FROM uc_dc_dev.sc_core.source_a
+        UNION ALL
+        SELECT id, val FROM uc_dc_dev.sc_core.source_b
+    )
+    INSERT INTO uc_dc_dev.sc_wrk.target_tbl
+    SELECT id, val FROM na_pos_non_calc
+    """
+    edges = parse_sql(sql, source_file="test_union.sql", source_line=1)
+    source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    assert "na_pos_non_calc" not in source_tables, (
+        f"na_pos_non_calc leaked as phantom; edges: {edges}"
+    )
+    assert any("source_a" in e.source_col or "source_b" in e.source_col for e in edges)
+
+
+def test_cross_cell_temp_view_uppercase_col_refs_resolve():
+    """Cross-cell temp view + CTE with UPPERCASE column references must resolve to real source.
+
+    Real-world pattern: cell 1 creates a temp view, cell 2 uses a CTE aliasing it
+    and selects with UPPERCASE column names (common in Databricks SQL notebooks).
+    The temp view resolution must be case-insensitive so final_so_po_data doesn't
+    leak as a phantom source table.
+    """
+    sql = """-- Databricks notebook source
+
+-- COMMAND ----------
+
+CREATE OR REPLACE TEMPORARY VIEW final_so_po_data AS
+SELECT a.src_sys_cd, a.key_id_ref_num
+FROM uc_dc_dev.sc_core.real_source_a a
+JOIN uc_dc_dev.sc_core.real_source_b b ON a.id = b.id;
+
+-- COMMAND ----------
+
+WITH CALCULATED_FINAL AS (
+    SELECT * FROM final_so_po_data
+)
+INSERT INTO uc_dc_dev.sc_wrk.smt_trx_so_po_emea_calc
+SELECT CALCULATED_FINAL.SRC_SYS_CD, CALCULATED_FINAL.KEY_ID_REF_NUM FROM CALCULATED_FINAL;
+"""
+    edges = parse_sql(sql, source_file="SC_WRK.SMT_TRX_SO_PO_EMEA_CALC.sql", source_line=None)
+    source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    # final_so_po_data must not appear as a source — it must be resolved through
+    assert "final_so_po_data" not in source_tables, (
+        f"final_so_po_data leaked as phantom source; edges: {edges}"
+    )
+    # Real sources must reach the target
+    target_edges = [e for e in edges if "smt_trx_so_po_emea_calc" in e.target_col]
+    assert len(target_edges) >= 2
+    assert all(
+        "uc_dc_dev.sc_core.real_source" in e.source_col for e in target_edges
+    ), f"Edges should trace to real_source_a/b: {target_edges}"
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []
