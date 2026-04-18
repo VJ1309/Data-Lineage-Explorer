@@ -24,6 +24,7 @@ def _edge_to_dict(edge) -> dict:
         "source_cell": edge.source_cell,
         "source_line": edge.source_line,
         "confidence": edge.confidence,
+        "qualified": edge.qualified,
     }
 
 
@@ -200,7 +201,7 @@ def refresh_source(source_id: str):
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
     state.parse_warnings.extend(
-        {"file": w.file, "error": w.error, "source_id": source_id}
+        {"file": w.file, "error": w.error, "severity": w.severity, "source_id": source_id}
         for w in new_warnings
     )
 
@@ -314,7 +315,8 @@ def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50, ma
         if edge_data:
             return {**_edge_to_dict(edge_data), "source_col": src, "target_col": tgt}
         return {"source_col": src, "target_col": tgt, "transform_type": None,
-                "expression": None, "source_file": None, "source_cell": None, "source_line": None}
+                "expression": None, "source_file": None, "source_cell": None,
+                "source_line": None, "confidence": "certain", "qualified": True}
 
     def get_preds(node: str, visited: set[str]) -> list[tuple[str, str, object]]:
         """Return (pred_node, target_node, edge_data) for all effective predecessors."""

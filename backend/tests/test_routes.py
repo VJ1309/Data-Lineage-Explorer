@@ -251,3 +251,27 @@ def test_warnings_include_source_id():
     for w in resp.json():
         assert "source_id" in w, f"Warning missing source_id: {w}"
         assert w["source_id"] == source_id
+        assert "severity" in w, f"Warning missing severity: {w}"
+        assert w["severity"] in ("info", "warn", "error")
+
+
+def test_lineage_edges_expose_qualified_field():
+    """GET /lineage edges must include a 'qualified' boolean per Tier 1 spec."""
+    zip_bytes = _make_zip({
+        "q.sql": "INSERT INTO result SELECT id FROM t JOIN s ON t.id = s.id"
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/lineage", params={"table": "result", "column": "id"})
+    assert resp.status_code == 200
+    edges = resp.json()["upstream"] + resp.json()["downstream"]
+    assert edges, "expected edges for result.id"
+    for e in edges:
+        assert "qualified" in e, f"edge missing qualified field: {e}"
+        assert isinstance(e["qualified"], bool)
