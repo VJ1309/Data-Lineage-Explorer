@@ -18,6 +18,9 @@ wheels/
 tmp/
 .superpowers/
 
+# Compound Engineering
+.compound-engineering/*.local.yaml
+
 # Node / frontend
 node_modules/
 .next/
