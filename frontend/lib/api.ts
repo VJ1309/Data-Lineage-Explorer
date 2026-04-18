@@ -37,14 +37,25 @@ export type ColumnMeta = {
   expression: string | null;
 };
 
+export type TransformType =
+  | "passthrough"
+  | "aggregation"
+  | "expression"
+  | "join_key"
+  | "window"
+  | "cast"
+  | "filter";
+
 export type LineageEdge = {
   source_col: string;
   target_col: string;
-  transform_type: string;
+  transform_type: TransformType;
   expression: string;
   source_file: string;
   source_cell: number | null;
   source_line: number | null;
+  confidence?: "certain" | "approximate";
+  qualified?: boolean;
 };
 
 export type LineageResponse = {
@@ -69,6 +80,8 @@ export type SearchResult = {
 export type Warning = {
   file: string;
   error: string;
+  severity?: "info" | "warn" | "error";
+  source_id?: string;
 };
 
 export type PathStep = {

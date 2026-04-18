@@ -1,6 +1,8 @@
 "use client";
+import { useState } from "react";
 import { useSources, useDeleteSource, useRefreshSource, useWarnings } from "@/lib/hooks";
 import { SourceForm } from "@/components/source-form";
+import { WarningsPanel } from "@/components/warnings-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -9,15 +11,18 @@ export default function SourcesPage() {
   const { data: warnings } = useWarnings();
   const del = useDeleteSource();
   const refresh = useRefreshSource();
+  const [showAll, setShowAll] = useState(false);
 
   return (
     <div className="max-w-3xl space-y-6">
       <h1 className="text-2xl font-semibold">Sources</h1>
 
       {warnings && warnings.length > 0 && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          ⚠ {warnings.length} parse warning{warnings.length > 1 ? "s" : ""} — some files may not be fully analyzed.
-        </div>
+        <WarningsPanel
+          warnings={warnings}
+          expanded={showAll}
+          onToggle={() => setShowAll((v) => !v)}
+        />
       )}
 
       <Card>

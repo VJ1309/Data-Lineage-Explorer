@@ -119,14 +119,38 @@ function toTableLevel(
 
 export function LineageGraph({ nodes, edges, targetColId }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [showJoinKeys, setShowJoinKeys] = useState(false);
   const [targetTable] = splitColId(targetColId);
 
-  const colPositions = useMemo(
-    () => layeredLayout(nodes.map((n) => n.id), edges.map((e) => ({ source: e.source_col, target: e.target_col }))),
-    [nodes, edges],
+  // Filter & join_key edges emit to pseudo-columns (target.__filter__, target.__joinkey__).
+  // Hide those edges AND their pseudo-column nodes unless the user opts in.
+  const visibleEdges = useMemo(
+    () => edges.filter((e) => {
+      if (!showFilters && e.transform_type === "filter") return false;
+      if (!showJoinKeys && e.transform_type === "join_key") return false;
+      return true;
+    }),
+    [edges, showFilters, showJoinKeys],
   );
 
-  const tableLevel = useMemo(() => toTableLevel(nodes.map((n) => n.id), edges), [nodes, edges]);
+  const visibleNodes = useMemo(() => {
+    const hidden = new Set<string>();
+    if (!showFilters) {
+      for (const n of nodes) if (n.id.endsWith(".__filter__")) hidden.add(n.id);
+    }
+    if (!showJoinKeys) {
+      for (const n of nodes) if (n.id.endsWith(".__joinkey__")) hidden.add(n.id);
+    }
+    return nodes.filter((n) => !hidden.has(n.id));
+  }, [nodes, showFilters, showJoinKeys]);
+
+  const colPositions = useMemo(
+    () => layeredLayout(visibleNodes.map((n) => n.id), visibleEdges.map((e) => ({ source: e.source_col, target: e.target_col }))),
+    [visibleNodes, visibleEdges],
+  );
+
+  const tableLevel = useMemo(() => toTableLevel(visibleNodes.map((n) => n.id), visibleEdges), [visibleNodes, visibleEdges]);
   const tablePositions = useMemo(
     () => layeredLayout(tableLevel.nodes.map((n) => n.id), tableLevel.edges),
     [tableLevel],
@@ -134,19 +158,23 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
 
   const rfNodes: Node[] = useMemo(() => {
     if (!collapsed) {
-      return nodes.map((n) => {
+      return visibleNodes.map((n) => {
         const [table, col] = splitColId(n.id);
         const pos = colPositions.get(n.id) ?? { x: 0, y: 0 };
         const isTarget = n.id === targetColId;
-        const hasIncoming = edges.some((e) => e.target_col === n.id);
-        const hasOutgoing = edges.some((e) => e.source_col === n.id);
+        const isPseudo = n.id.endsWith(".__filter__") || n.id.endsWith(".__joinkey__");
+        const hasIncoming = visibleEdges.some((e) => e.target_col === n.id);
+        const hasOutgoing = visibleEdges.some((e) => e.source_col === n.id);
         const isSource = !hasIncoming && hasOutgoing;
         const isSink = hasIncoming && !hasOutgoing;
 
         let bg = "#1a2233", border = "1px solid #3d4f6b", color = "#a0b4c8";
         if (isTarget) { bg = "#1e3a5f"; border = "2px solid #7ec8e3"; color = "#7ec8e3"; }
+        else if (isPseudo) { bg = "#2a2418"; border = "1px dashed #f59e0b"; color = "#fbbf24"; }
         else if (isSource) { bg = "#1a2a1a"; border = "1px solid #4ade80"; color = "#86efac"; }
         else if (isSink) { bg = "#2a1a2a"; border = "1px solid #c084fc"; color = "#d8b4fe"; }
+
+        const displayCol = col === "__filter__" ? "⚑ filter" : col === "__joinkey__" ? "⚷ join_key" : col;
 
         return {
           id: n.id,
@@ -155,7 +183,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
             label: (
               <div style={{ textAlign: "center" }}>
                 <div style={{ fontSize: 10, opacity: 0.65, marginBottom: 2, wordBreak: "break-all", lineHeight: 1.3 }}>{table}</div>
-                <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{col}</div>
+                <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{displayCol}</div>
               </div>
             ),
           },
@@ -177,7 +205,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
       else if (isSource) { bg = "#1a2a1a"; border = "1px solid #4ade80"; color = "#86efac"; }
       else if (isSink) { bg = "#2a1a2a"; border = "1px solid #c084fc"; color = "#d8b4fe"; }
 
-      const colCount = nodes.filter((cn) => splitColId(cn.id)[0] === n.id).length;
+      const colCount = visibleNodes.filter((cn) => splitColId(cn.id)[0] === n.id).length;
 
       return {
         id: n.id,
@@ -193,20 +221,32 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "8px 12px", width: 200, textAlign: "center" as const },
       };
     });
-  }, [collapsed, nodes, edges, targetColId, targetTable, colPositions, tableLevel, tablePositions]);
+  }, [collapsed, visibleNodes, visibleEdges, targetColId, targetTable, colPositions, tableLevel, tablePositions]);
 
   const rfEdges: Edge[] = useMemo(() => {
     if (!collapsed) {
-      return edges.map((e, i) => ({
-        id: `e-${i}`,
-        source: e.source_col,
-        target: e.target_col,
-        label: e.transform_type,
-        animated: e.transform_type === "aggregation" || e.transform_type === "window",
-        style: { stroke: TRANSFORM_COLOURS[e.transform_type] ?? "#888", strokeWidth: 1.5 },
-        labelStyle: { fontSize: 9, fill: "#888" },
-        labelBgStyle: { fill: "#0a0f1a", fillOpacity: 0.8 },
-      }));
+      return visibleEdges.map((e, i) => {
+        const isUnqualified = e.qualified === false;
+        const isApprox = e.confidence === "approximate";
+        const dim = isUnqualified || isApprox;
+        const stroke = TRANSFORM_COLOURS[e.transform_type] ?? "#888";
+        const label = `${e.transform_type}${isUnqualified ? " ~" : ""}`;
+        return {
+          id: `e-${i}`,
+          source: e.source_col,
+          target: e.target_col,
+          label,
+          animated: e.transform_type === "aggregation" || e.transform_type === "window",
+          style: {
+            stroke,
+            strokeWidth: 1.5,
+            strokeDasharray: dim ? "4 3" : undefined,
+            opacity: dim ? 0.55 : 1,
+          },
+          labelStyle: { fontSize: 9, fill: dim ? "#6b7280" : "#888" },
+          labelBgStyle: { fill: "#0a0f1a", fillOpacity: 0.8 },
+        };
+      });
     }
 
     return tableLevel.edges.map((e, i) => {
@@ -222,18 +262,42 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         labelBgStyle: { fill: "#0a0f1a", fillOpacity: 0.8 },
       };
     });
-  }, [collapsed, edges, tableLevel]);
+  }, [collapsed, visibleEdges, tableLevel]);
+
+  const filterEdgeCount = edges.filter((e) => e.transform_type === "filter").length;
+  const joinKeyEdgeCount = edges.filter((e) => e.transform_type === "join_key").length;
+
+  const pillClass = (on: boolean) =>
+    `text-xs px-3 py-1 rounded border transition-colors ${
+      on
+        ? "bg-accent text-accent-foreground border-accent"
+        : "text-muted-foreground border-border hover:text-foreground"
+    }`;
 
   return (
     <div>
-      <div className="flex justify-end mb-2">
+      <div className="flex justify-end mb-2 gap-2">
+        {filterEdgeCount > 0 && (
+          <button
+            onClick={() => setShowFilters((v) => !v)}
+            className={pillClass(showFilters)}
+            title="Show edges from WHERE predicates"
+          >
+            ⚑ Filters ({filterEdgeCount})
+          </button>
+        )}
+        {joinKeyEdgeCount > 0 && (
+          <button
+            onClick={() => setShowJoinKeys((v) => !v)}
+            className={pillClass(showJoinKeys)}
+            title="Show edges from JOIN ON predicates"
+          >
+            ⚷ Join keys ({joinKeyEdgeCount})
+          </button>
+        )}
         <button
           onClick={() => setCollapsed((v) => !v)}
-          className={`text-xs px-3 py-1 rounded border transition-colors ${
-            collapsed
-              ? "bg-accent text-accent-foreground border-accent"
-              : "text-muted-foreground border-border hover:text-foreground"
-          }`}
+          className={pillClass(collapsed)}
         >
           {collapsed ? "⊞ Expand columns" : "⊟ Group by table"}
         </button>
@@ -260,8 +324,8 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
                 return "#3d4f6b";
               }
               if (n.id === targetColId) return "#7ec8e3";
-              const hasIn = edges.some((e) => e.target_col === n.id);
-              const hasOut = edges.some((e) => e.source_col === n.id);
+              const hasIn = visibleEdges.some((e) => e.target_col === n.id);
+              const hasOut = visibleEdges.some((e) => e.source_col === n.id);
               if (!hasIn && hasOut) return "#4ade80";
               if (hasIn && !hasOut) return "#c084fc";
               return "#3d4f6b";
@@ -271,11 +335,12 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
           />
         </ReactFlow>
         {/* Legend */}
-        <div className="flex gap-4 px-3 py-1.5 text-xs" style={{ color: "#6b7a8d" }}>
+        <div className="flex gap-4 px-3 py-1.5 text-xs flex-wrap" style={{ color: "#6b7a8d" }}>
           <span><span style={{ color: "#4ade80" }}>●</span> Source</span>
           <span><span style={{ color: "#7ec8e3" }}>●</span> Selected</span>
           <span><span style={{ color: "#c084fc" }}>●</span> Target</span>
-          <span className="ml-auto flex gap-3">
+          <span title="Unqualified / approximate lineage"><span style={{ color: "#6b7280", letterSpacing: 2 }}>╌</span> Unqualified</span>
+          <span className="ml-auto flex gap-3 flex-wrap">
             {Object.entries(TRANSFORM_COLOURS).map(([type, color]) => (
               <span key={type}><span style={{ color }}>—</span> {type}</span>
             ))}
