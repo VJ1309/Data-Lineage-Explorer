@@ -527,6 +527,40 @@ def test_temp_view_wildcard_chain_two_hops():
     assert "real_table.*" in sources, "must resolve two-hop wildcard chain to real_table"
 
 
+def test_merge_into_matched_update_emits_edges():
+    """MERGE ... WHEN MATCHED THEN UPDATE SET col = source.col must emit edges."""
+    sql = """
+    MERGE INTO target_table t
+    USING source_table s
+    ON t.id = s.id
+    WHEN MATCHED THEN UPDATE SET t.val = s.val, t.status = s.status
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "target_table.val" in targets, f"MERGE UPDATE target missing; targets={targets}"
+    assert "target_table.status" in targets
+    assert "source_table.val" in sources
+    assert "source_table.status" in sources
+
+
+def test_merge_into_not_matched_insert_emits_edges():
+    """MERGE ... WHEN NOT MATCHED THEN INSERT (cols) VALUES (s.cols) must emit edges."""
+    sql = """
+    MERGE INTO target_table t
+    USING source_table s
+    ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "target_table.id" in targets
+    assert "target_table.val" in targets
+    assert "source_table.id" in sources
+    assert "source_table.val" in sources
+
+
 def test_one_bad_statement_does_not_drop_good_statements():
     """A single malformed statement must not lose the surrounding good ones."""
     sql = """

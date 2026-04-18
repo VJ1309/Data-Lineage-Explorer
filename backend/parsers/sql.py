@@ -366,6 +366,128 @@ def _parse_select_node(
     return edges
 
 
+def _parse_merge(
+    merge: exp.Merge,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    """Parse a MERGE INTO statement into column-level lineage edges.
+
+    Handles both WHEN MATCHED THEN UPDATE and WHEN NOT MATCHED THEN INSERT branches.
+    Ignores the ON predicate columns (those belong to __joinkey__ lineage, not data flow).
+    """
+    target_node = merge.this
+    using_node = merge.args.get("using")
+    if not isinstance(target_node, exp.Table):
+        return []
+    target_table = _qualified_table_name(target_node)
+    target_alias = target_node.alias or target_node.name
+
+    alias_map: dict[str, str] = {target_alias: target_table}
+    source_tables: list[str] = [target_table]
+    if isinstance(using_node, exp.Table):
+        using_qualified = _qualified_table_name(using_node)
+        using_alias = using_node.alias or using_node.name
+        alias_map[using_alias] = using_qualified
+        source_tables.append(using_qualified)
+
+    default_table = source_tables[-1] if len(source_tables) > 1 else target_table
+
+    def _resolve(hint: str) -> tuple[str, bool]:
+        if hint in alias_map:
+            return alias_map[hint], True
+        for tbl in source_tables:
+            if tbl == hint or tbl.endswith(f".{hint}"):
+                return tbl, True
+        return default_table, False
+
+    def _col_name(col: exp.Column) -> tuple[str, str | None]:
+        """Return (column_name, source_table_or_None). None when resolution can't pick a side."""
+        name = col.name
+        hint = col.table
+        if not hint:
+            return name, None
+        resolved, _ = _resolve(hint)
+        return name, resolved
+
+    def _make_edge(
+        source_col: str, target_col: str, transform_type: str, expr_str: str,
+    ) -> LineageEdge:
+        return LineageEdge(
+            source_col=source_col,
+            target_col=target_col,
+            transform_type=transform_type,
+            expression=expr_str,
+            source_file=source_file,
+            source_cell=source_cell,
+            source_line=source_line,
+            confidence="certain",
+            qualified=True,
+        )
+
+    edges: list[LineageEdge] = []
+    whens = merge.args.get("whens")
+    if whens is None:
+        return edges
+
+    for when in whens.expressions:
+        then = when.args.get("then")
+        if isinstance(then, exp.Update):
+            for eq in then.args.get("expressions") or []:
+                if not isinstance(eq, exp.EQ):
+                    continue
+                lhs = eq.this
+                rhs = eq.expression
+                if not isinstance(lhs, exp.Column):
+                    continue
+                tgt_name, tgt_tbl = _col_name(lhs)
+                target_col = f"{tgt_tbl or target_table}.{tgt_name}"
+                transform_type, expr_str = _classify_transform(rhs)
+                col_refs = list(rhs.find_all(exp.Column)) if isinstance(rhs, exp.Expression) else []
+                if not col_refs and isinstance(rhs, exp.Column):
+                    col_refs = [rhs]
+                if col_refs:
+                    for cref in col_refs:
+                        src_name, src_tbl = _col_name(cref)
+                        edges.append(_make_edge(
+                            source_col=f"{src_tbl or default_table}.{src_name}",
+                            target_col=target_col,
+                            transform_type=transform_type,
+                            expr_str=expr_str,
+                        ))
+        elif isinstance(then, exp.Insert):
+            cols_tuple = then.this
+            vals_expr = then.expression
+            tgt_cols: list[exp.Column] = []
+            if isinstance(cols_tuple, exp.Tuple):
+                tgt_cols = [c for c in cols_tuple.expressions if isinstance(c, exp.Column)]
+            val_items: list[exp.Expression] = []
+            if isinstance(vals_expr, exp.Values):
+                first = vals_expr.expressions[0] if vals_expr.expressions else None
+                if isinstance(first, exp.Tuple):
+                    val_items = list(first.expressions)
+            elif isinstance(vals_expr, exp.Tuple):
+                val_items = list(vals_expr.expressions)
+            for tgt_col, val in zip(tgt_cols, val_items):
+                tgt_name = tgt_col.name
+                target_col = f"{target_table}.{tgt_name}"
+                transform_type, expr_str = _classify_transform(val)
+                col_refs = list(val.find_all(exp.Column)) if isinstance(val, exp.Expression) else []
+                if not col_refs and isinstance(val, exp.Column):
+                    col_refs = [val]
+                if col_refs:
+                    for cref in col_refs:
+                        src_name, src_tbl = _col_name(cref)
+                        edges.append(_make_edge(
+                            source_col=f"{src_tbl or default_table}.{src_name}",
+                            target_col=target_col,
+                            transform_type=transform_type,
+                            expr_str=expr_str,
+                        ))
+    return edges
+
+
 def _parse_single_statement(
     statement: exp.Expression,
     source_file: str,
@@ -373,6 +495,8 @@ def _parse_single_statement(
     source_cell: int | None,
 ) -> list[LineageEdge]:
     """Parse a single SQL statement (handles UNION/UNION ALL) and return lineage edges."""
+    if isinstance(statement, exp.Merge):
+        return _parse_merge(statement, source_file, source_line, source_cell)
     body = _get_statement_body(statement)
     if body is None:
         body = statement.find(exp.Select)
