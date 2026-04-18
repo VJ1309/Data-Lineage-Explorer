@@ -736,7 +736,7 @@ def _resolve_temp_views(
         if src in tv_sources:
             return tv_sources[src]
         src_tbl = src.rsplit(".", 1)[0] if "." in src else ""
-        if src_tbl not in temp_views:
+        if src_tbl not in temp_views_lower:
             return None
         if src.endswith(".*"):
             # Gather all sources recorded for any column of this temp view

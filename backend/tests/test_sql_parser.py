@@ -834,3 +834,27 @@ def test_bad_sql_collects_warning():
     assert warnings_list[0]  # non-empty error message
 
 
+
+
+def test_temp_view_with_mixed_case_in_databricks_notebook():
+    """Databricks SQL: uppercase temp view name defined in one cell must be resolved
+    when referenced by name in a later cell (the lookup was using original-case
+    temp_views set instead of temp_views_lower, causing the fallback to short-circuit)."""
+    # Simulates two Databricks cells separated by -- COMMAND ----------
+    sql = "\n".join([
+        "-- COMMAND ----------",
+        "CREATE OR REPLACE TEMPORARY VIEW MY_STAGING AS",
+        "SELECT id, val FROM uc_dev.raw.source_tbl",
+        "",
+        "-- COMMAND ----------",
+        "INSERT INTO uc_dev.gold.final",
+        "SELECT id, val FROM MY_STAGING",
+    ])
+    edges = parse_sql(sql, source_file="nb.sql", source_line=1)
+    sources = {e.source_col.lower() for e in edges}
+    targets = {e.target_col.lower() for e in edges}
+    assert "uc_dev.raw.source_tbl.id" in sources, "temp view must be resolved to base table"
+    assert "uc_dev.raw.source_tbl.val" in sources
+    assert not any("my_staging" in s for s in sources), "MY_STAGING must not leak as source"
+    assert "uc_dev.gold.final.id" in targets
+    assert "uc_dev.gold.final.val" in targets
