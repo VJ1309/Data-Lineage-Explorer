@@ -318,15 +318,11 @@ def _parse_select_node(
             src_col_ids.append(f"{tbl}.{name}")
         if not src_col_ids:
             continue
-        # POSEXPLODE: first output col is position (synthetic), rest trace to array.
-        is_posexplode = isinstance(lat_fn, exp.Posexplode)
-        for idx, out_col in enumerate(lat_cols):
-            key = f"{lat_alias}.{out_col}"
-            if is_posexplode and idx == 0 and len(lat_cols) > 1:
-                # pos column — link to array source for traceability
-                lateral_expand[key] = list(src_col_ids)
-            else:
-                lateral_expand[key] = list(src_col_ids)
+        # All output cols (both value and POSEXPLODE pos) trace to the array source.
+        # We keep the position slot linked for traceability — consumers can filter
+        # on transform_type if they want to suppress it.
+        for out_col in lat_cols:
+            lateral_expand[f"{lat_alias}.{out_col}"] = list(src_col_ids)
 
     def _resolve_table_hint(hint: str) -> tuple[str, bool]:
         """Resolve a table alias/name. Returns (resolved_table, is_certain)."""
