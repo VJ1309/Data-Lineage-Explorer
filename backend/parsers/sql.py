@@ -465,6 +465,11 @@ def _parse_select_node(
         col_refs = list(expr_node.find_all(exp.Column))
 
         if not col_refs:
+            # Pure literal expressions (NULL, 'string', 42, TRUE) have no real source
+            # column. Attributing them to default_table creates phantom source entries
+            # for CTE aliases when the CTE body doesn't define that column.
+            if isinstance(expr_node, (exp.Null, exp.Literal, exp.Boolean)):
+                continue
             edges.append(LineageEdge(
                 source_col=f"{default_table}.{alias}",
                 target_col=target_col,

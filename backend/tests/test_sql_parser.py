@@ -768,6 +768,58 @@ SELECT CALCULATED_FINAL.SRC_SYS_CD, CALCULATED_FINAL.KEY_ID_REF_NUM FROM CALCULA
     ), f"Edges should trace to real_source_a/b: {target_edges}"
 
 
+def test_null_literal_in_union_all_branch_does_not_create_phantom_source():
+    """NULL / constant literals in UNION ALL branches must not attribute to CTE default table.
+
+    Pattern: INSERT INTO target SELECT NULL AS col FROM some_cte — the parser used to
+    create source_col="some_cte.col" because there are no Column nodes in a NULL expr.
+    After fix: literal-only expressions are skipped so no phantom phantom source edge is
+    emitted; the real source from the non-NULL branch still resolves correctly.
+    """
+    sql = """
+    WITH data_cte AS (
+        SELECT src_sys_cd, po_num FROM uc_dc_dev.sc_core.real_table
+        UNION ALL
+        SELECT src_sys_cd, po_num FROM uc_dc_dev.sc_core.real_table2
+    )
+    INSERT INTO uc_dc_dev.sc_wrk.target_tbl
+    SELECT po_num, NULL AS extra_col FROM data_cte
+    """
+    edges = parse_sql(sql, source_file="test_null_literal.sql", source_line=1)
+    source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    # data_cte must not appear as source (it's a CTE, not a real table)
+    assert "data_cte" not in source_tables, (
+        f"data_cte leaked as phantom source via NULL literal; edges: {edges}"
+    )
+    # Real sources must still appear
+    assert any("real_table" in e.source_col for e in edges)
+
+
+def test_string_literal_in_union_all_branch_does_not_create_phantom_source():
+    """String constant ('CAP' AS col) from a multi-source CTE branch must not create phantom.
+
+    When the CTE is UNION ALL (goes to multi_map, not simple_map), the default_table in
+    each SELECT branch is the CTE alias itself. A string literal like 'CAP' AS src_sys_cd
+    has no column refs, so the old code created CTE_alias.src_sys_cd as phantom source.
+    """
+    sql = """
+    WITH so_po_data AS (
+        SELECT id, src_sys_cd FROM uc_dc_dev.sc_core.real_src
+        UNION ALL
+        SELECT id, src_sys_cd FROM uc_dc_dev.sc_core.real_src2
+    )
+    INSERT INTO uc_dc_dev.sc_wrk.target_tbl
+    SELECT id, 'CAP' AS src_sys_cd FROM so_po_data
+    """
+    edges = parse_sql(sql, source_file="test_string_literal.sql", source_line=1)
+    source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    assert "so_po_data" not in source_tables, (
+        f"so_po_data leaked as phantom source via string literal 'CAP'; edges: {edges}"
+    )
+    # real source still appears for the non-literal column
+    assert any("real_src" in e.source_col for e in edges)
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []
