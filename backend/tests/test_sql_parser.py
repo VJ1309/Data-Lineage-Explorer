@@ -610,6 +610,38 @@ def test_single_source_unqualified_column_stays_qualified():
     assert e.qualified is True
 
 
+def test_lateral_view_explode_links_output_to_source_array():
+    """LATERAL VIEW EXPLODE(t.items) e AS item — e.item must link back to orders.items."""
+    sql = """
+    INSERT INTO result
+    SELECT t.id, e.item
+    FROM orders t
+    LATERAL VIEW EXPLODE(t.items) e AS item
+    """
+    edges = parse_sql(sql, source_file="l.sql", source_line=1)
+    item_edges = [e for e in edges if e.target_col == "result.item"]
+    assert item_edges, f"no edge for result.item; edges={[(e.source_col, e.target_col) for e in edges]}"
+    sources = {e.source_col for e in item_edges}
+    assert "orders.items" in sources, (
+        f"exploded output must trace to orders.items; got {sources}"
+    )
+
+
+def test_lateral_view_posexplode_links_both_columns():
+    """POSEXPLODE yields (pos, value) — value column must trace to the array source."""
+    sql = """
+    INSERT INTO result
+    SELECT t.id, e.pos, e.val
+    FROM orders t
+    LATERAL VIEW POSEXPLODE(t.items) e AS pos, val
+    """
+    edges = parse_sql(sql, source_file="l.sql", source_line=1)
+    val_sources = {e.source_col for e in edges if e.target_col == "result.val"}
+    assert "orders.items" in val_sources, (
+        f"posexplode val must trace to orders.items; got {val_sources}"
+    )
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []

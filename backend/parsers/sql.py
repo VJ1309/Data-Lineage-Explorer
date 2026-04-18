@@ -257,6 +257,48 @@ def _parse_select_node(
     default_table = source_tables[0] if source_tables else "unknown"
     multi_source = len(source_tables) > 1
 
+    # LATERAL VIEW EXPLODE(t.arr) e AS item  → treat `e.item` as a passthrough of
+    # the array source column (t.arr). POSEXPLODE yields (pos, value); the value
+    # slot traces to the array, the pos slot is synthetic (still linked for reference).
+    # Map: "alias.col_name" → list[source_col_id]
+    lateral_expand: dict[str, list[str]] = {}
+    for lat in (select_node.args.get("laterals") or []):
+        lat_alias_node = lat.args.get("alias")
+        if not isinstance(lat_alias_node, exp.TableAlias):
+            continue
+        lat_alias = lat_alias_node.this.name if lat_alias_node.this else None
+        if not lat_alias:
+            continue
+        lat_cols = [c.name for c in (lat_alias_node.columns or []) if c.name]
+        lat_fn = lat.this
+        if not isinstance(lat_fn, exp.Expression):
+            continue
+        src_col_refs = list(lat_fn.find_all(exp.Column))
+        src_col_ids: list[str] = []
+        for cref in src_col_refs:
+            hint = cref.table
+            name = cref.name
+            if not name:
+                continue
+            if hint and hint in alias_map:
+                tbl = alias_map[hint]
+            elif hint:
+                tbl = hint
+            else:
+                tbl = default_table
+            src_col_ids.append(f"{tbl}.{name}")
+        if not src_col_ids:
+            continue
+        # POSEXPLODE: first output col is position (synthetic), rest trace to array.
+        is_posexplode = isinstance(lat_fn, exp.Posexplode)
+        for idx, out_col in enumerate(lat_cols):
+            key = f"{lat_alias}.{out_col}"
+            if is_posexplode and idx == 0 and len(lat_cols) > 1:
+                # pos column — link to array source for traceability
+                lateral_expand[key] = list(src_col_ids)
+            else:
+                lateral_expand[key] = list(src_col_ids)
+
     def _resolve_table_hint(hint: str) -> tuple[str, bool]:
         """Resolve a table alias/name. Returns (resolved_table, is_certain)."""
         if hint in alias_map:
@@ -343,6 +385,21 @@ def _parse_select_node(
             table_hint = col_ref.table
             col_name = col_ref.name
             if not col_name:
+                continue
+            # Lateral view alias expansion: e.item → underlying array source(s)
+            if table_hint and f"{table_hint}.{col_name}" in lateral_expand:
+                for src_id in lateral_expand[f"{table_hint}.{col_name}"]:
+                    edges.append(LineageEdge(
+                        source_col=src_id,
+                        target_col=target_col,
+                        transform_type=transform_type,
+                        expression=expr_str,
+                        source_file=source_file,
+                        source_cell=source_cell,
+                        source_line=source_line,
+                        confidence="certain",
+                        qualified=True,
+                    ))
                 continue
             if table_hint:
                 resolved_table, certain = _resolve_table_hint(table_hint)
