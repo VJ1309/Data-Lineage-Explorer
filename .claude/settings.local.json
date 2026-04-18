@@ -80,7 +80,10 @@
       "Bash(cat frontend/.env)",
       "Bash(ls frontend/.env*)",
       "Bash(cat frontend/.vercel/project.json)",
-      "Bash(ls frontend/.vercel/)"
+      "Bash(ls frontend/.vercel/)",
+      "Bash(agent-browser install *)",
+      "Bash(npx skills *)",
+      "Bash(command -v agent-browser)"
     ]
   }
 }
