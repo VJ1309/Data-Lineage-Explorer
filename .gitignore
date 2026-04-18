@@ -17,6 +17,11 @@ wheels/
 # Temp and tool dirs
 tmp/
 .superpowers/
+test.sql
+
+# Test / build caches
+.pytest_cache/
+tsconfig.tsbuildinfo
 
 # Compound Engineering
 .compound-engineering/*.local.yaml
