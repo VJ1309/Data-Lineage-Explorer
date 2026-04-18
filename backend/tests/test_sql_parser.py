@@ -683,6 +683,29 @@ def test_where_clause_without_columns_emits_no_filter_edge():
     assert not any(e.target_col == "result.__filter__" for e in edges)
 
 
+def test_join_on_emits_joinkey_edges():
+    """JOIN t ON t.id = s.id must emit joinkey edges from both sides to target.__joinkey__."""
+    sql = """
+    INSERT INTO result
+    SELECT t.val FROM t JOIN s ON t.id = s.id
+    """
+    edges = parse_sql(sql, source_file="j.sql", source_line=1)
+    jk_edges = [e for e in edges if e.target_col == "result.__joinkey__"]
+    assert jk_edges, f"no join_key edges; edges={[(e.source_col, e.target_col) for e in edges]}"
+    sources = {e.source_col for e in jk_edges}
+    assert "t.id" in sources, f"missing t.id in joinkey sources; got {sources}"
+    assert "s.id" in sources, f"missing s.id in joinkey sources; got {sources}"
+    for e in jk_edges:
+        assert e.transform_type == "join_key", f"joinkey edges must have transform_type=join_key; got {e.transform_type}"
+
+
+def test_join_without_on_clause_emits_no_joinkey():
+    """CROSS JOIN has no ON — must not emit phantom joinkey edges."""
+    sql = "INSERT INTO result SELECT t.val FROM t CROSS JOIN s"
+    edges = parse_sql(sql, source_file="j.sql", source_line=1)
+    assert not any(e.target_col == "result.__joinkey__" for e in edges)
+
+
 def test_bad_sql_collects_warning():
     """SQLGlot parse failure must surface in _warnings when caller passes the list."""
     warnings_list: list[str] = []

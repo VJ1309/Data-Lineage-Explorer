@@ -265,6 +265,7 @@ def _parse_select_node(
                           source_file, source_line, source_cell,
                           subquery_aliases=subquery_aliases)
 
+    join_on_exprs: list[exp.Expression] = []
     for join in (select_node.args.get("joins") or []):
         jtable = join.this
         if isinstance(jtable, exp.Table):
@@ -278,6 +279,9 @@ def _parse_select_node(
             _process_subquery(jtable, edges, source_tables, cte_map,
                               source_file, source_line, source_cell,
                               subquery_aliases=subquery_aliases)
+        on_expr = join.args.get("on")
+        if on_expr is not None:
+            join_on_exprs.append(on_expr)
 
     default_table = source_tables[0] if source_tables else "unknown"
     multi_source = len(source_tables) > 1
@@ -334,6 +338,39 @@ def _parse_select_node(
             if tbl == hint or tbl.endswith(f".{hint}"):
                 return tbl, True
         return default_table, False
+
+    # JOIN ... ON → __joinkey__ edges. Emit one edge per distinct column in
+    # each ON predicate so join keys are visible but do not pollute normal
+    # column lineage.
+    for on_expr in join_on_exprs:
+        on_expr_str = on_expr.sql(dialect="databricks")
+        seen_jk_src: set[str] = set()
+        for col_ref in on_expr.find_all(exp.Column):
+            col_name = col_ref.name
+            if not col_name:
+                continue
+            table_hint = col_ref.table
+            if table_hint:
+                resolved_table, _certain = _resolve_table_hint(table_hint)
+                qualified = True
+            else:
+                resolved_table = default_table
+                qualified = not multi_source
+            src = f"{resolved_table}.{col_name}"
+            if src in seen_jk_src:
+                continue
+            seen_jk_src.add(src)
+            edges.append(LineageEdge(
+                source_col=src,
+                target_col=f"{target_table}.__joinkey__",
+                transform_type="join_key",
+                expression=on_expr_str,
+                source_file=source_file,
+                source_cell=source_cell,
+                source_line=source_line,
+                confidence="certain" if qualified else "approximate",
+                qualified=qualified,
+            ))
 
     # WHERE → __filter__ edges. Emit one edge per distinct column reference
     # in the predicate to target.__filter__ so consumers can see which columns
