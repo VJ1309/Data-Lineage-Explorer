@@ -4,7 +4,7 @@ import {
   ReactFlow,
   Background,
   Controls,
-  MiniMap,
+  MarkerType,
   type Node,
   type Edge,
 } from "@xyflow/react";
@@ -237,6 +237,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
           target: e.target_col,
           label,
           animated: e.transform_type === "aggregation" || e.transform_type === "window",
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
           style: {
             stroke,
             strokeWidth: 1.5,
@@ -252,12 +253,14 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
     return tableLevel.edges.map((e, i) => {
       const dominantType = [...e.types][0] ?? "passthrough";
       const label = e.count === 1 ? dominantType : `${e.count} edges`;
+      const tStroke = TRANSFORM_COLOURS[dominantType] ?? "#888";
       return {
         id: `te-${i}`,
         source: e.source,
         target: e.target,
         label,
-        style: { stroke: TRANSFORM_COLOURS[dominantType] ?? "#888", strokeWidth: 2 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: tStroke },
+        style: { stroke: tStroke, strokeWidth: 2 },
         labelStyle: { fontSize: 9, fill: "#888" },
         labelBgStyle: { fill: "#0a0f1a", fillOpacity: 0.8 },
       };
@@ -313,26 +316,6 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         >
           <Background color="#1a2233" />
           <Controls />
-          <MiniMap
-            nodeColor={(n) => {
-              if (collapsed) {
-                if (n.id === targetTable) return "#7ec8e3";
-                const hasIn = tableLevel.edges.some((e) => e.target === n.id);
-                const hasOut = tableLevel.edges.some((e) => e.source === n.id);
-                if (!hasIn && hasOut) return "#4ade80";
-                if (hasIn && !hasOut) return "#c084fc";
-                return "#3d4f6b";
-              }
-              if (n.id === targetColId) return "#7ec8e3";
-              const hasIn = visibleEdges.some((e) => e.target_col === n.id);
-              const hasOut = visibleEdges.some((e) => e.source_col === n.id);
-              if (!hasIn && hasOut) return "#4ade80";
-              if (hasIn && !hasOut) return "#c084fc";
-              return "#3d4f6b";
-            }}
-            style={{ background: "#0d1520", border: "1px solid #1e2d42" }}
-            maskColor="rgba(10, 15, 26, 0.65)"
-          />
         </ReactFlow>
         {/* Legend */}
         <div className="flex gap-4 px-3 py-1.5 text-xs flex-wrap" style={{ color: "#6b7a8d" }}>
