@@ -1,8 +1,7 @@
 "use client";
 import { useState } from "react";
-import { useSources, useDeleteSource, useRefreshSource, useWarnings, useSourceFiles } from "@/lib/hooks";
+import { useSources, useDeleteSource, useRefreshSource, useSourceFiles } from "@/lib/hooks";
 import { SourceForm } from "@/components/source-form";
-import { WarningsPanel } from "@/components/warnings-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChevronDown, ChevronRight, FileText } from "lucide-react";
@@ -98,20 +97,10 @@ function SourceRow({ src }: { src: Source }) {
 
 export default function SourcesPage() {
   const { data: sources, isLoading } = useSources();
-  const { data: warnings } = useWarnings();
-  const [showAll, setShowAll] = useState(false);
 
   return (
     <div className="max-w-3xl space-y-6">
       <h1 className="text-2xl font-semibold">Sources</h1>
-
-      {warnings && warnings.length > 0 && (
-        <WarningsPanel
-          warnings={warnings}
-          expanded={showAll}
-          onToggle={() => setShowAll((v) => !v)}
-        />
-      )}
 
       <Card>
         <CardHeader>
