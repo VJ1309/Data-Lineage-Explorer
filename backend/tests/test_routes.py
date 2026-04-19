@@ -255,6 +255,45 @@ def test_warnings_include_source_id():
         assert w["severity"] in ("info", "warn", "error")
 
 
+def test_joinkey_columns_aggregate_all_on_expressions():
+    """list_columns must return all distinct JOIN ON expressions for __joinkey__ nodes.
+
+    Two JOINs with different ON columns produce two distinct expressions. Both must
+    appear in the expression field — not just the one from preds[0].
+    """
+    sql = (
+        "INSERT INTO result "
+        "SELECT a.id, b.name, c.code "
+        "FROM table_a a "
+        "JOIN table_b b ON a.id = b.a_id "
+        "JOIN table_c c ON a.ref = c.ref_id"
+    )
+    zip_bytes = _make_zip({"q.sql": sql})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/tables/result/columns")
+    assert resp.status_code == 200
+    cols = resp.json()
+
+    jk_col = next((c for c in cols if c["column"] == "__joinkey__"), None)
+    assert jk_col is not None, f"no __joinkey__ column; got: {[c['column'] for c in cols]}"
+
+    expr = jk_col["expression"]
+    assert expr is not None, "__joinkey__ expression must not be None when join keys are present"
+    # Each distinct ON clause must appear — b.a_id is only in the first, c.ref_id only in the second
+    assert "a_id" in expr, f"first JOIN ON expression missing from result; got: {expr!r}"
+    assert "ref_id" in expr, f"second JOIN ON expression missing from result; got: {expr!r}"
+    # Both join source tables must be listed
+    assert "table_b" in jk_col["source_tables"]
+    assert "table_c" in jk_col["source_tables"]
+
+
 def test_lineage_edges_expose_qualified_field():
     """GET /lineage edges must include a 'qualified' boolean per Tier 1 spec."""
     zip_bytes = _make_zip({
