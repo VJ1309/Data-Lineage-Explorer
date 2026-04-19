@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository Layout
 
 ```
-backend/    FastAPI backend (deployed to Railway)
-frontend/   Next.js frontend (deployed to Vercel)
+backend/         FastAPI backend (deployed to Railway)
+frontend/        Next.js frontend (deployed to Vercel)
+docs/solutions/  documented solutions to past problems (bugs, best practices), organized by category with YAML frontmatter (module, tags, problem_type)
 ```
 
 Both are committed to the same git repo. The working directory for most backend work is `backend/`; for frontend it is `frontend/`.
