@@ -360,8 +360,75 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         >
           {collapsed ? "⊞ Expand columns" : "⊟ Group by table"}
         </button>
+
+        <div ref={dropdownRef} style={{ position: "relative" }}>
+          <button
+            onClick={() => setDownloadOpen((v) => !v)}
+            className={pillClass(downloadOpen)}
+            disabled={downloadStatus === "loading"}
+          >
+            {downloadStatus === "loading"
+              ? "…"
+              : downloadStatus === "failed"
+              ? "Failed"
+              : "↓ Download"}
+          </button>
+          {downloadOpen && (
+            <div
+              style={{
+                position: "absolute",
+                top: "100%",
+                right: 0,
+                marginTop: 4,
+                background: "#1a2233",
+                border: "1px solid #3d4f6b",
+                borderRadius: 6,
+                overflow: "hidden",
+                zIndex: 50,
+                minWidth: 130,
+              }}
+            >
+              <button
+                onClick={handleDownloadPng}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  color: "#a0b4c8",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#243047")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                ↓ PNG
+              </button>
+              <button
+                onClick={handleDownloadJson}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  color: "#a0b4c8",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#243047")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                ↓ JSON
+              </button>
+            </div>
+          )}
+        </div>
       </div>
-      <div style={{ height: 500, background: "#0a0f1a", borderRadius: 8 }}>
+      <div ref={containerRef} style={{ height: 500, background: "#0a0f1a", borderRadius: 8 }}>
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
