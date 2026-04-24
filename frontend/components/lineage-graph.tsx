@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import {
   ReactFlow,
   Background,
@@ -10,6 +10,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { LineageEdge } from "@/lib/api";
+import { toPng } from "html-to-image";
 
 const TRANSFORM_COLOURS: Record<string, string> = {
   passthrough: "#4ade80",
@@ -123,6 +124,22 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
   const [showJoinKeys, setShowJoinKeys] = useState(false);
   const [targetTable] = splitColId(targetColId);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState<"idle" | "loading" | "failed">("idle");
+
+  useEffect(() => {
+    if (!downloadOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as globalThis.Node)) {
+        setDownloadOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [downloadOpen]);
+
   // Filter & join_key edges emit to pseudo-columns (target.__filter__, target.__joinkey__).
   // Hide those edges AND their pseudo-column nodes unless the user opts in.
   const visibleEdges = useMemo(
@@ -149,6 +166,37 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
     () => layeredLayout(visibleNodes.map((n) => n.id), visibleEdges.map((e) => ({ source: e.source_col, target: e.target_col }))),
     [visibleNodes, visibleEdges],
   );
+
+  const handleDownloadJson = useCallback(() => {
+    const colId = targetColId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const payload = JSON.stringify({ nodes: visibleNodes, edges: visibleEdges }, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lineage-${colId}-data.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setDownloadOpen(false);
+  }, [visibleNodes, visibleEdges, targetColId]);
+
+  const handleDownloadPng = useCallback(async () => {
+    if (!containerRef.current) return;
+    setDownloadStatus("loading");
+    setDownloadOpen(false);
+    try {
+      const colId = targetColId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const dataUrl = await toPng(containerRef.current, { backgroundColor: "#0a0f1a" });
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = `lineage-${colId}-graph.png`;
+      a.click();
+      setDownloadStatus("idle");
+    } catch {
+      setDownloadStatus("failed");
+      setTimeout(() => setDownloadStatus("idle"), 1500);
+    }
+  }, [targetColId]);
 
   const tableLevel = useMemo(() => toTableLevel(visibleNodes.map((n) => n.id), visibleEdges), [visibleNodes, visibleEdges]);
   const tablePositions = useMemo(
