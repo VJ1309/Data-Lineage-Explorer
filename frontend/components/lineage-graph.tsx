@@ -174,19 +174,6 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
     [visibleNodes, visibleEdges],
   );
 
-  const handleDownloadJson = useCallback(() => {
-    const colId = targetColId.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const payload = JSON.stringify({ nodes: visibleNodes, edges: visibleEdges }, null, 2);
-    const blob = new Blob([payload], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `lineage-${colId}-data.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setDownloadOpen(false);
-  }, [visibleNodes, visibleEdges, targetColId]);
-
   const handleDownloadPng = useCallback(async () => {
     if (!containerRef.current) return;
     setDownloadStatus("loading");
@@ -207,6 +194,23 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
   }, [targetColId]);
 
   const tableLevel = useMemo(() => toTableLevel(visibleNodes.map((n) => n.id), visibleEdges), [visibleNodes, visibleEdges]);
+
+  const handleDownloadJson = useCallback(() => {
+    const colId = targetColId.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const exportNodes = collapsed ? tableLevel.nodes : visibleNodes;
+    const exportEdges = collapsed
+      ? tableLevel.edges.map((e) => ({ source: e.source, target: e.target, count: e.count, types: [...e.types] }))
+      : visibleEdges;
+    const payload = JSON.stringify({ nodes: exportNodes, edges: exportEdges }, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lineage-${colId}-data.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setDownloadOpen(false);
+  }, [collapsed, tableLevel, visibleNodes, visibleEdges, targetColId]);
   const tablePositions = useMemo(
     () => layeredLayout(tableLevel.nodes.map((n) => n.id), tableLevel.edges),
     [tableLevel],
