@@ -428,18 +428,20 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
           )}
         </div>
       </div>
-      <div ref={containerRef} style={{ height: 500, background: "#0a0f1a", borderRadius: 8 }}>
-        <ReactFlow
-          nodes={rfNodes}
-          edges={rfEdges}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          minZoom={0.3}
-          maxZoom={2}
-        >
-          <Background color="#1a2233" />
-          <Controls />
-        </ReactFlow>
+      <div style={{ height: 500, background: "#0a0f1a", borderRadius: 8 }}>
+        <div ref={containerRef} style={{ height: "100%", position: "relative" }}>
+          <ReactFlow
+            nodes={rfNodes}
+            edges={rfEdges}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            minZoom={0.3}
+            maxZoom={2}
+          >
+            <Background color="#1a2233" />
+            <Controls />
+          </ReactFlow>
+        </div>
         {/* Legend */}
         <div className="flex gap-4 px-3 py-1.5 text-xs flex-wrap" style={{ color: "#6b7a8d" }}>
           <span><span style={{ color: "#4ade80" }}>●</span> Source</span>
