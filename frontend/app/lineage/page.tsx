@@ -1,12 +1,14 @@
 "use client";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
+import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLineage, usePaths } from "@/lib/hooks";
 import { LineageGraph } from "@/components/lineage-graph";
 import { LineageTree } from "@/components/lineage-tree";
 import { CodeInspector } from "@/components/code-inspector";
 import { PathInspector } from "@/components/path-inspector";
+import { GitBranch } from "lucide-react";
 
 function LineageContent() {
   const params = useSearchParams();
@@ -17,9 +19,21 @@ function LineageContent() {
 
   if (!table || !column) {
     return (
-      <p className="text-sm text-muted-foreground">
-        Select a column from the <a href="/catalog" className="underline">Catalog</a> to view its lineage.
-      </p>
+      <div className="flex flex-col items-center justify-center h-[60vh] gap-5 text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground">
+          <GitBranch className="h-7 w-7" />
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-sm font-medium text-foreground">No column selected</p>
+          <p className="text-sm text-muted-foreground max-w-xs">
+            Browse the{" "}
+            <Link href="/catalog" className="text-primary underline underline-offset-2 hover:text-primary/80 transition-colors">
+              Catalog
+            </Link>{" "}
+            and click &ldquo;Lineage&rdquo; on any column to trace its data flow.
+          </p>
+        </div>
+      </div>
     );
   }
 
@@ -27,15 +41,32 @@ function LineageContent() {
   if (error) return <p className="text-sm text-destructive">Error: {(error as Error).message}</p>;
   if (!data) return null;
 
+  const tableParts = table.split(".");
+  const tableName = tableParts[tableParts.length - 1];
+  const tablePrefix = tableParts.slice(0, -1).join(".");
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h1 className="text-2xl font-semibold">{column}</h1>
-        <span className="text-muted-foreground text-sm">in {table}</span>
-      </div>
-      <div className="text-xs text-muted-foreground">
-        {data.upstream.length} upstream source{data.upstream.length !== 1 ? "s" : ""} ·{" "}
-        {data.downstream.length} downstream dependent{data.downstream.length !== 1 ? "s" : ""}
+      <div>
+        <div className="flex items-baseline gap-2">
+          <h1 className="font-mono text-2xl font-semibold text-foreground">{column}</h1>
+          <span className="text-muted-foreground text-sm">
+            in{" "}
+            {tablePrefix && <span className="text-muted-foreground/60">{tablePrefix}.</span>}
+            <span className="text-muted-foreground font-medium">{tableName}</span>
+          </span>
+        </div>
+        <div className="flex items-center gap-3 mt-1.5">
+          <span className="text-xs text-muted-foreground">
+            <span className="text-green-400 font-medium">{data.upstream.length}</span>
+            {" "}upstream source{data.upstream.length !== 1 ? "s" : ""}
+          </span>
+          <span className="text-muted-foreground/30 text-xs">·</span>
+          <span className="text-xs text-muted-foreground">
+            <span className="text-purple-400 font-medium">{data.downstream.length}</span>
+            {" "}downstream dependent{data.downstream.length !== 1 ? "s" : ""}
+          </span>
+        </div>
       </div>
 
       <Tabs defaultValue="graph">

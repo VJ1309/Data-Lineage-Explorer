@@ -6,38 +6,36 @@ import { TransformBadge } from "@/components/transform-badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import type { TableSummary, ColumnMeta } from "@/lib/api";
+import { ArrowRight } from "lucide-react";
 
-const ROLE_CONFIG: Record<string, { label: string; description: string; color: string }> = {
+const ROLE_CONFIG: Record<string, { label: string; description: string; color: string; dot: string }> = {
   target: {
     label: "Target Tables",
     description: "Final output tables — written to but not read from within these files",
-    color: "text-green-600 dark:text-green-400",
+    color: "text-green-400",
+    dot: "bg-green-500",
   },
   intermediate: {
     label: "Intermediate Tables",
     description: "Both read from and written to — staging or transformation tables",
-    color: "text-amber-600 dark:text-amber-400",
+    color: "text-amber-400",
+    dot: "bg-amber-500",
   },
   source: {
     label: "Source Tables",
     description: "External source tables — read from but not created in these files",
-    color: "text-blue-600 dark:text-blue-400",
+    color: "text-blue-400",
+    dot: "bg-blue-500",
   },
   result: {
     label: "Ungrouped Queries",
     description: "Standalone SELECT queries with no INSERT INTO target",
     color: "text-muted-foreground",
+    dot: "bg-muted-foreground",
   },
 };
 
 const ROLE_ORDER = ["target", "intermediate", "source", "result"];
-
-const ROLE_DOT: Record<string, string> = {
-  target: "bg-green-500",
-  intermediate: "bg-amber-500",
-  source: "bg-blue-500",
-  result: "bg-gray-400",
-};
 
 function groupByRole(tables: TableSummary[]): Record<string, TableSummary[]> {
   const groups: Record<string, TableSummary[]> = {};
@@ -55,14 +53,16 @@ function ColumnRow({ col, onLineage }: { col: ColumnMeta; onLineage: () => void 
 
   return (
     <>
-      <tr className="border-b hover:bg-muted/40 transition-colors">
-        <td className="py-2 px-3 font-medium">{col.column}</td>
+      <tr className="border-b border-border hover:bg-accent/50 transition-colors group">
+        <td className="py-2 px-3">
+          <span className="font-mono text-xs text-foreground">{col.column}</span>
+        </td>
         <td className="py-2 px-3 text-xs">
           {col.source_tables.length > 0
             ? col.source_tables.map((st, i) => (
                 <span key={st}>
                   {i > 0 && <span className="text-muted-foreground">, </span>}
-                  <span className="text-blue-600 dark:text-blue-400">{st}</span>
+                  <span className="font-mono text-blue-400">{st}</span>
                 </span>
               ))
             : <span className="text-muted-foreground">—</span>
@@ -82,19 +82,24 @@ function ColumnRow({ col, onLineage }: { col: ColumnMeta; onLineage: () => void 
             )}
           </div>
         </td>
-        <td className="py-2 px-3 text-xs text-muted-foreground truncate max-w-[200px]">
-          {col.source_file ?? "—"}
-          {col.source_cell != null ? ` (cell ${col.source_cell})` : ""}
-          {col.source_line != null ? `:${col.source_line}` : ""}
+        <td className="py-2 px-3 text-xs text-muted-foreground">
+          <span className="font-mono">
+            {col.source_file ?? "—"}
+            {col.source_cell != null ? ` (cell ${col.source_cell})` : ""}
+            {col.source_line != null ? `:${col.source_line}` : ""}
+          </span>
         </td>
         <td className="py-2 px-3">
-          <Button size="sm" variant="ghost" className="text-xs h-6 px-2" onClick={onLineage}>
-            View Lineage →
-          </Button>
+          <button
+            onClick={onLineage}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors opacity-0 group-hover:opacity-100"
+          >
+            Lineage <ArrowRight className="h-3 w-3" />
+          </button>
         </td>
       </tr>
       {open && hasExpr && (
-        <tr className="border-b bg-muted/20">
+        <tr className="border-b border-border bg-secondary/50">
           <td colSpan={5} className="px-6 py-2">
             <code className="text-xs font-mono text-purple-400 whitespace-pre-wrap break-all">
               {col.expression}
@@ -118,47 +123,50 @@ export default function CatalogPage() {
   ) ?? [];
 
   const grouped = groupByRole(filtered);
-
-  // Find the role of the selected table for display
   const selectedRole = tables?.find((t) => t.table === selectedTable)?.role;
+  const selectedConfig = ROLE_CONFIG[selectedRole || "source"];
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-120px)]">
+    <div className="flex gap-0 h-[calc(100vh-120px)] -mx-6 -mt-6">
       {/* Sidebar */}
-      <div className="w-64 flex-shrink-0 space-y-2">
-        <Input
-          placeholder="Search tables…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="h-8 text-sm"
-        />
-        <div className="text-xs text-muted-foreground uppercase tracking-wide px-1">
-          {isLoading ? "Loading…" : `${filtered.length} tables`}
+      <div className="w-64 flex-shrink-0 border-r border-border bg-card flex flex-col">
+        <div className="p-3 border-b border-border">
+          <Input
+            placeholder="Search tables…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 text-sm bg-secondary border-border"
+          />
+          <div className="text-xs text-muted-foreground mt-2 px-0.5">
+            {isLoading ? "Loading…" : `${filtered.length} table${filtered.length !== 1 ? "s" : ""}`}
+          </div>
         </div>
-        <div className="space-y-3 overflow-y-auto max-h-[calc(100vh-200px)]">
+
+        <div className="flex-1 overflow-y-auto p-2 space-y-3">
           {ROLE_ORDER.map((role) => {
             const group = grouped[role];
             if (!group || group.length === 0) return null;
             const config = ROLE_CONFIG[role];
             return (
               <div key={role}>
-                <div className={`px-2 py-1 text-xs font-semibold uppercase tracking-wider ${config.color}`}>
+                <div className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-widest ${config.color} opacity-70`}>
                   {config.label} ({group.length})
                 </div>
                 <div className="space-y-0.5 mt-0.5">
                   {group.map((t) => (
                     <button
                       key={t.table}
+                      title={t.table}
                       onClick={() => setSelectedTable(t.table)}
-                      className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors flex items-center gap-2 ${
+                      className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-center gap-2 ${
                         selectedTable === t.table
-                          ? "bg-accent text-accent-foreground font-medium"
-                          : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                          ? "bg-primary/15 text-primary font-medium"
+                          : "hover:bg-accent text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${ROLE_DOT[role]}`} />
-                      <span className="truncate">{t.table}</span>
-                      <span className="ml-auto text-xs text-muted-foreground flex-shrink-0">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${config.dot}`} />
+                      <span className="truncate font-mono">{t.table}</span>
+                      <span className="ml-auto text-muted-foreground flex-shrink-0 tabular-nums">
                         {t.column_count}
                       </span>
                     </button>
@@ -171,44 +179,50 @@ export default function CatalogPage() {
       </div>
 
       {/* Main panel */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto p-6">
         {!selectedTable && (
-          <div className="mt-4 space-y-4">
+          <div className="space-y-5">
             <p className="text-sm text-muted-foreground">Select a table to view its columns and lineage.</p>
-            {/* Summary cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {ROLE_ORDER.map((role) => {
                 const count = grouped[role]?.length ?? 0;
                 const config = ROLE_CONFIG[role];
                 return (
-                  <div key={role} className="border rounded-lg p-3">
-                    <div className={`text-2xl font-bold ${config.color}`}>{count}</div>
-                    <div className="text-xs font-medium mt-1">{config.label}</div>
-                    <div className="text-xs text-muted-foreground mt-0.5">{config.description}</div>
+                  <div key={role} className="border border-border rounded-lg p-4 bg-card">
+                    <div className={`text-3xl font-bold tabular-nums ${config.color}`}>{count}</div>
+                    <div className="text-sm font-medium mt-1.5 text-foreground">{config.label}</div>
+                    <div className="text-xs text-muted-foreground mt-1 leading-relaxed">{config.description}</div>
                   </div>
                 );
               })}
             </div>
           </div>
         )}
+
         {selectedTable && (
           <>
-            <div className="flex items-center gap-3 mb-4">
-              <span className={`w-2.5 h-2.5 rounded-full ${ROLE_DOT[selectedRole || "source"]}`} />
-              <h2 className="text-lg font-semibold">{selectedTable}</h2>
-              <span className={`text-xs font-medium uppercase ${ROLE_CONFIG[selectedRole || "source"]?.color}`}>
+            <div className="flex items-center gap-2.5 mb-5 pb-4 border-b border-border">
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${selectedConfig.dot}`} />
+              <h2 className="font-mono text-base font-semibold text-foreground">{selectedTable}</h2>
+              <span className={`text-[10px] font-semibold uppercase tracking-widest ml-1 ${selectedConfig.color}`}>
                 {selectedRole}
               </span>
+              {columns && (
+                <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                  {columns.length} column{columns.length !== 1 ? "s" : ""}
+                </span>
+              )}
             </div>
+
             {colsLoading && <p className="text-sm text-muted-foreground">Loading columns…</p>}
             {columns && (
               <table className="w-full text-sm border-collapse">
                 <thead>
-                  <tr className="border-b text-xs text-muted-foreground uppercase tracking-wide">
-                    <th className="text-left py-2 px-3 font-medium">Column</th>
-                    <th className="text-left py-2 px-3 font-medium">Source Table</th>
-                    <th className="text-left py-2 px-3 font-medium">Transform</th>
-                    <th className="text-left py-2 px-3 font-medium">Defined In</th>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 px-3 text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Column</th>
+                    <th className="text-left py-2 px-3 text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Source Table</th>
+                    <th className="text-left py-2 px-3 text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Transform</th>
+                    <th className="text-left py-2 px-3 text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Defined In</th>
                     <th className="py-2 px-3"></th>
                   </tr>
                 </thead>

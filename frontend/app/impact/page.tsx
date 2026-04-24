@@ -4,6 +4,33 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { useTables, useColumns, useImpact } from "@/lib/hooks";
 import { TransformBadge } from "@/components/transform-badge";
 import { Button } from "@/components/ui/button";
+import { ChevronDown } from "lucide-react";
+
+function StyledSelect({
+  value,
+  onChange,
+  disabled,
+  children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="h-9 w-full appearance-none rounded-md border border-border bg-secondary px-3 pr-8 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 focus:border-ring disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+      >
+        {children}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+    </div>
+  );
+}
 
 function ImpactContent() {
   const params = useSearchParams();
@@ -21,67 +48,62 @@ function ImpactContent() {
 
   return (
     <div className="max-w-3xl space-y-6">
-      <h1 className="text-2xl font-semibold">Impact Analyzer</h1>
-      <p className="text-sm text-muted-foreground">
-        Select a source column to see all downstream columns affected by a change.
-      </p>
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">Impact Analyzer</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Trace all downstream columns affected when a source column changes.
+        </p>
+      </div>
 
-      {/* Selector */}
-      <div className="flex gap-3 items-end">
-        <div className="space-y-1">
-          <label className="text-xs text-muted-foreground uppercase tracking-wide">Table</label>
-          <select
-            className="border rounded px-2 py-1.5 text-sm bg-background"
-            value={table}
-            onChange={(e) => { setTable(e.target.value); setColumn(""); }}
-          >
+      <div className="flex gap-3 items-end rounded-lg border border-border bg-card p-4">
+        <div className="flex-1 space-y-1.5">
+          <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Table</label>
+          <StyledSelect value={table} onChange={(v) => { setTable(v); setColumn(""); }}>
             <option value="">— select table —</option>
             {tables?.map((t) => <option key={t.table} value={t.table}>{t.table}</option>)}
-          </select>
+          </StyledSelect>
         </div>
-        <div className="space-y-1">
-          <label className="text-xs text-muted-foreground uppercase tracking-wide">Column</label>
-          <select
-            className="border rounded px-2 py-1.5 text-sm bg-background"
-            value={column}
-            onChange={(e) => setColumn(e.target.value)}
-            disabled={!table}
-          >
+        <div className="flex-1 space-y-1.5">
+          <label className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Column</label>
+          <StyledSelect value={column} onChange={setColumn} disabled={!table}>
             <option value="">— select column —</option>
             {columns?.map((c) => <option key={c.column} value={c.column}>{c.column}</option>)}
-          </select>
+          </StyledSelect>
         </div>
-        <Button onClick={handleApply} disabled={!table || !column} size="sm">
+        <Button onClick={handleApply} disabled={!table || !column} className="shrink-0">
           Analyze
         </Button>
       </div>
 
-      {/* Results */}
       {isLoading && <p className="text-sm text-muted-foreground">Analyzing…</p>}
       {error && <p className="text-sm text-destructive">Error: {(error as Error).message}</p>}
+
       {data && (
         <>
-          <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            ⚠ If <strong>{table}.{column}</strong> changes,{" "}
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+            If <span className="font-mono font-medium text-amber-200">{column}</span> in{" "}
+            <span className="font-mono font-medium text-amber-200">{table.split(".").pop()}</span> changes,{" "}
             <strong>{data.affected_count} downstream column{data.affected_count !== 1 ? "s" : ""}</strong>{" "}
             {data.affected_count !== 1 ? "are" : "is"} affected.
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {data.downstream.length === 0 && (
               <p className="text-sm text-muted-foreground">No downstream dependents found.</p>
             )}
             {data.downstream.map((edge, i) => (
               <div
                 key={i}
-                className="flex items-center gap-3 rounded-md border border-l-4 border-l-amber-400 px-3 py-2 text-sm"
-                style={{ marginLeft: `${Math.min(i, 4) * 16}px` }}
+                className="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2 text-sm"
+                style={{ marginLeft: `${Math.min(i, 4) * 20}px` }}
               >
-                <span className="text-amber-500">↓</span>
-                <span className="font-medium">{edge.target_col}</span>
+                <span className="text-amber-500 text-xs font-mono">↓</span>
+                <span className="font-mono text-xs font-medium text-foreground">{edge.target_col}</span>
                 <TransformBadge type={edge.transform_type} />
-                <span className="text-xs text-muted-foreground truncate">{edge.expression}</span>
-                <span className="ml-auto text-xs text-muted-foreground">
+                {edge.expression && (
+                  <span className="text-xs text-muted-foreground truncate font-mono">{edge.expression}</span>
+                )}
+                <span className="ml-auto text-xs text-muted-foreground font-mono shrink-0">
                   {edge.source_file}
                   {edge.source_cell != null ? ` cell ${edge.source_cell}` : ""}
                   {edge.source_line != null ? `:${edge.source_line}` : ""}

@@ -433,7 +433,18 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
         </div>
       </div>
       <div style={{ height: 500, background: "#0a0f1a", borderRadius: 8 }}>
-        <div ref={containerRef} style={{ height: "100%", position: "relative" }}>
+        <div
+          ref={containerRef}
+          style={{
+            height: "100%",
+            position: "relative",
+            "--xy-controls-button-background-color-default": "#1e293b",
+            "--xy-controls-button-background-color-hover-default": "#334155",
+            "--xy-controls-button-color-default": "#94a3b8",
+            "--xy-controls-button-border-color-default": "#334155",
+            "--xy-controls-button-box-shadow-default": "none",
+          } as React.CSSProperties}
+        >
           <ReactFlow
             nodes={rfNodes}
             edges={rfEdges}

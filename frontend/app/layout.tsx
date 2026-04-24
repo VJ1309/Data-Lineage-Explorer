@@ -1,10 +1,18 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Bricolage_Grotesque, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { QueryProvider } from "@/components/query-provider";
 import { Nav } from "@/components/nav";
 
-const inter = Inter({ subsets: ["latin"] });
+const bricolage = Bricolage_Grotesque({
+  subsets: ["latin"],
+  variable: "--font-sans",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
+});
 
 export const metadata: Metadata = {
   title: "DataLineage Explorer",
@@ -17,8 +25,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>
+    <html lang="en" className={`dark ${bricolage.variable} ${jetbrainsMono.variable}`}>
+      <body>
         <QueryProvider>
           <Nav />
           <main className="p-6">{children}</main>
