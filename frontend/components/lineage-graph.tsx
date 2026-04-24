@@ -126,6 +126,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState<"idle" | "loading" | "failed">("idle");
 
@@ -139,6 +140,12 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [downloadOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
 
   // Filter & join_key edges emit to pseudo-columns (target.__filter__, target.__joinkey__).
   // Hide those edges AND their pseudo-column nodes unless the user opts in.
@@ -194,7 +201,8 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
       setDownloadStatus("idle");
     } catch {
       setDownloadStatus("failed");
-      setTimeout(() => setDownloadStatus("idle"), 1500);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => setDownloadStatus("idle"), 1500);
     }
   }, [targetColId]);
 
