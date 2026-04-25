@@ -1,5 +1,6 @@
 """SQL column lineage parser using SQLGlot."""
 from __future__ import annotations
+import re
 import sqlglot
 import sqlglot.expressions as exp
 from sqlglot import tokens
@@ -50,7 +51,10 @@ def _classify_transform(node: exp.Expression) -> tuple[str, str | None]:
             return "cast", expr_str
     for n in all_nodes:
         if isinstance(n, (exp.Sum, exp.Count, exp.Avg, exp.Max, exp.Min,
-                          exp.ArrayAgg, exp.GroupConcat)):
+                          exp.ArrayAgg, exp.GroupConcat,
+                          exp.ApproxDistinct, exp.Quantile,
+                          exp.Stddev, exp.StddevSamp, exp.StddevPop,
+                          exp.Variance, exp.ApproxQuantile)):
             return "aggregation", expr_str
     for n in all_nodes:
         if isinstance(n, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Case,
@@ -257,7 +261,18 @@ def _parse_select_node(
     alias_map: dict[str, str] = {}
     source_tables: list[str] = []
     from_table = from_clause.this
-    if isinstance(from_table, exp.Table):
+    if isinstance(from_table, exp.Table) and isinstance(from_table.this, exp.Anonymous):
+        # Table-valued function: read_files(), cloud_files(), etc.
+        fn_expr = from_table.this
+        fn_args = fn_expr.expressions
+        path_str = next((a.this for a in fn_args if isinstance(a, exp.Literal)), None)
+        raw_name = path_str or fn_expr.name or "tvf"
+        synthetic = re.sub(r'[^a-zA-Z0-9_]', '_', raw_name).strip('_') or "tvf"
+        alias = from_table.alias
+        if alias:
+            alias_map[alias] = synthetic
+        source_tables.append(synthetic)
+    elif isinstance(from_table, exp.Table):
         qualified = _qualified_table_name(from_table)
         alias = from_table.alias
         resolved = cte_map.get(from_table.name, qualified)
@@ -272,7 +287,17 @@ def _parse_select_node(
     join_on_exprs: list[exp.Expression] = []
     for join in (select_node.args.get("joins") or []):
         jtable = join.this
-        if isinstance(jtable, exp.Table):
+        if isinstance(jtable, exp.Table) and isinstance(jtable.this, exp.Anonymous):
+            fn_expr = jtable.this
+            fn_args = fn_expr.expressions
+            path_str = next((a.this for a in fn_args if isinstance(a, exp.Literal)), None)
+            raw_name = path_str or fn_expr.name or "tvf"
+            synthetic = re.sub(r'[^a-zA-Z0-9_]', '_', raw_name).strip('_') or "tvf"
+            alias = jtable.alias
+            if alias:
+                alias_map[alias] = synthetic
+            source_tables.append(synthetic)
+        elif isinstance(jtable, exp.Table):
             qualified = _qualified_table_name(jtable)
             alias = jtable.alias
             resolved = cte_map.get(jtable.name, qualified)
@@ -404,6 +429,70 @@ def _parse_select_node(
                 source_line=source_line,
                 confidence="certain" if qualified else "approximate",
                 qualified=qualified,
+            ))
+
+    # QUALIFY → __qualify__ edges (window-function row filtering, post-window)
+    qualify_clause = select_node.args.get("qualify")
+    if qualify_clause is not None:
+        qualify_expr_str = qualify_clause.sql(dialect="databricks")
+        seen_qualify_src: set[str] = set()
+        for col_ref in qualify_clause.find_all(exp.Column):
+            col_name = col_ref.name
+            if not col_name:
+                continue
+            table_hint = col_ref.table
+            if table_hint:
+                resolved_table, _certain = _resolve_table_hint(table_hint)
+                qqualified = True
+            else:
+                resolved_table = default_table
+                qqualified = not multi_source
+            src = f"{resolved_table}.{col_name}"
+            if src in seen_qualify_src:
+                continue
+            seen_qualify_src.add(src)
+            edges.append(LineageEdge(
+                source_col=src,
+                target_col=f"{target_table}.__qualify__",
+                transform_type="filter",
+                expression=qualify_expr_str,
+                source_file=source_file,
+                source_cell=source_cell,
+                source_line=source_line,
+                confidence="certain" if qqualified else "approximate",
+                qualified=qqualified,
+            ))
+
+    # HAVING → __having__ edges (post-aggregation row filtering)
+    having_clause = select_node.args.get("having")
+    if having_clause is not None:
+        having_expr_str = having_clause.sql(dialect="databricks")
+        seen_having_src: set[str] = set()
+        for col_ref in having_clause.find_all(exp.Column):
+            col_name = col_ref.name
+            if not col_name:
+                continue
+            table_hint = col_ref.table
+            if table_hint:
+                resolved_table, _certain = _resolve_table_hint(table_hint)
+                hqualified = True
+            else:
+                resolved_table = default_table
+                hqualified = not multi_source
+            src = f"{resolved_table}.{col_name}"
+            if src in seen_having_src:
+                continue
+            seen_having_src.add(src)
+            edges.append(LineageEdge(
+                source_col=src,
+                target_col=f"{target_table}.__having__",
+                transform_type="filter",
+                expression=having_expr_str,
+                source_file=source_file,
+                source_cell=source_cell,
+                source_line=source_line,
+                confidence="certain" if hqualified else "approximate",
+                qualified=hqualified,
             ))
 
     # Walk SELECT expressions
@@ -544,11 +633,17 @@ def _parse_merge(
 
     alias_map: dict[str, str] = {target_alias: target_table}
     source_tables: list[str] = [target_table]
+    subquery_aliases: set[str] = set()
     if isinstance(using_node, exp.Table):
         using_qualified = _qualified_table_name(using_node)
         using_alias = using_node.alias or using_node.name
         alias_map[using_alias] = using_qualified
         source_tables.append(using_qualified)
+    elif isinstance(using_node, exp.Subquery):
+        sub_alias = using_node.alias or _next_sub_alias()
+        alias_map[sub_alias] = sub_alias
+        source_tables.append(sub_alias)
+        subquery_aliases.add(sub_alias)
 
     default_table = source_tables[-1] if len(source_tables) > 1 else target_table
 
@@ -585,8 +680,23 @@ def _parse_merge(
         )
 
     edges: list[LineageEdge] = []
+
+    # If the USING clause is a subquery, parse its body to get source column edges
+    # (e.g. MERGE INTO t USING (SELECT id, val FROM staging WHERE active = 1) AS s)
+    if isinstance(using_node, exp.Subquery):
+        sub_alias = next(iter(subquery_aliases), None)
+        if sub_alias:
+            sub_selects = _collect_union_selects(using_node.this) if using_node.this else []
+            for sub_sel in sub_selects:
+                edges.extend(_parse_select_node(
+                    sub_sel, sub_alias, {}, source_file, source_line, source_cell,
+                    subquery_aliases=subquery_aliases,
+                ))
+
     whens = merge.args.get("whens")
     if whens is None:
+        if subquery_aliases:
+            return _resolve_temp_views(edges, subquery_aliases)
         return edges
 
     for when in whens.expressions:
@@ -643,7 +753,104 @@ def _parse_merge(
                             transform_type=transform_type,
                             expr_str=expr_str,
                         ))
+    if subquery_aliases:
+        return _resolve_temp_views(edges, subquery_aliases)
     return edges
+
+
+def _parse_copy(
+    copy_stmt: exp.Copy,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    """Handle COPY INTO target FROM 'path' — emit approximate wildcard edge.
+
+    COPY INTO is a Databricks-specific bulk-load statement. Column-level
+    lineage is not recoverable without schema, so we emit a __file__.* →
+    target.* wildcard edge to keep the target table visible in the graph.
+    """
+    if not isinstance(copy_stmt.this, exp.Table):
+        return []
+    target_table = _qualified_table_name(copy_stmt.this)
+    return [LineageEdge(
+        source_col="__file__.*",
+        target_col=f"{target_table}.*",
+        transform_type="passthrough",
+        expression=None,
+        source_file=source_file,
+        source_cell=source_cell,
+        source_line=source_line,
+        confidence="approximate",
+        qualified=False,
+    )]
+
+
+def _parse_clone(
+    create_stmt: exp.Create,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    """Handle CREATE TABLE target CLONE source — emit approximate wildcard edge.
+
+    SHALLOW/DEEP CLONE copies all data from source. Column-level lineage is
+    a structural copy, so we emit source.* → target.* to keep both tables
+    visible in the graph.
+    """
+    clone_node = create_stmt.args.get("clone")
+    if not clone_node or not isinstance(create_stmt.this, exp.Table):
+        return []
+    target_table = _qualified_table_name(create_stmt.this)
+    if not (isinstance(clone_node, exp.Clone) and isinstance(clone_node.this, exp.Table)):
+        return []
+    source_table = _qualified_table_name(clone_node.this)
+    return [LineageEdge(
+        source_col=f"{source_table}.*",
+        target_col=f"{target_table}.*",
+        transform_type="passthrough",
+        expression=None,
+        source_file=source_file,
+        source_cell=source_cell,
+        source_line=source_line,
+        confidence="approximate",
+        qualified=False,
+    )]
+
+
+_DEEP_CLONE_RE = re.compile(
+    r'\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(\S+)\s+DEEP\s+CLONE\s+(\S+)',
+    re.IGNORECASE,
+)
+
+
+def _parse_command_fallback(
+    cmd_text: str,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    """Extract lineage from SQL constructs that SQLGlot falls back to exp.Command.
+
+    Currently handles:
+    - CREATE TABLE t DEEP CLONE src (SHALLOW/plain CLONE are structured nodes)
+    """
+    m = _DEEP_CLONE_RE.search(cmd_text)
+    if m:
+        target_table = m.group(1).strip(';')
+        source_table = m.group(2).strip(';')
+        return [LineageEdge(
+            source_col=f"{source_table}.*",
+            target_col=f"{target_table}.*",
+            transform_type="passthrough",
+            expression=None,
+            source_file=source_file,
+            source_cell=source_cell,
+            source_line=source_line,
+            confidence="approximate",
+            qualified=False,
+        )]
+    return []
 
 
 def _parse_single_statement(
@@ -655,6 +862,13 @@ def _parse_single_statement(
     """Parse a single SQL statement (handles UNION/UNION ALL) and return lineage edges."""
     if isinstance(statement, exp.Merge):
         return _parse_merge(statement, source_file, source_line, source_cell)
+    if isinstance(statement, exp.Copy):
+        return _parse_copy(statement, source_file, source_line, source_cell)
+    if isinstance(statement, exp.Create) and statement.args.get("clone"):
+        return _parse_clone(statement, source_file, source_line, source_cell)
+    if isinstance(statement, exp.Command):
+        cmd_text = f"{statement.name} {statement.args.get('expression') or ''}"
+        return _parse_command_fallback(cmd_text, source_file, source_line, source_cell)
     body = _get_statement_body(statement)
     if body is None:
         body = statement.find(exp.Select)
@@ -854,6 +1068,20 @@ def _detect_temp_views(sql_text: str) -> set[str]:
     return names
 
 
+_DOUBLE_QUOTED_IDENT_RE = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"')
+
+
+def _normalize_double_quotes(sql: str) -> str:
+    """Convert double-quoted identifiers to backtick equivalents before parsing.
+
+    SQLGlot issue #6303: the Databricks dialect tokenizes "col" as a string
+    literal instead of a quoted identifier. Replacing with `col` restores
+    correct column resolution for ANSI-style quoted names.
+    Only matches valid identifier patterns to avoid touching actual strings.
+    """
+    return _DOUBLE_QUOTED_IDENT_RE.sub(r'`\1`', sql)
+
+
 _DATABRICKS_SQL_HEADER = "-- Databricks notebook source"
 _DATABRICKS_SQL_SEP = "-- COMMAND ----------"
 
@@ -917,7 +1145,7 @@ def parse_sql(
     statements: list[exp.Expression] = []
     for stmt_sql in _split_top_level_statements(sql):
         try:
-            parsed = sqlglot.parse_one(stmt_sql, dialect="databricks")
+            parsed = sqlglot.parse_one(_normalize_double_quotes(stmt_sql), dialect="databricks")
         except Exception as exc:
             if _warnings is not None:
                 preview = stmt_sql.strip().splitlines()[0][:80]
