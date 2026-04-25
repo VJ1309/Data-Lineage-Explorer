@@ -259,7 +259,7 @@ export function TransformInspector({
       {/* Truncation note */}
       {truncated && (
         <p className="text-xs text-muted-foreground">
-          Showing {paths.length} path{paths.length !== 1 ? "s" : ""} — more may exist; chain may also be deeper than shown.
+          Showing {paths.length} path{paths.length !== 1 ? "s" : ""} — more paths may exist.
         </p>
       )}
 
