@@ -79,15 +79,12 @@ function TreeNodeRow({
         {direction === "downstream" && depth > 0 && (
           <span className="text-muted-foreground text-xs flex-shrink-0">→</span>
         )}
-        <span className={`font-mono text-xs flex-shrink-0 ${
-          isSource ? "text-green-500" : isTarget ? "text-purple-400" : "text-muted-foreground"
-        }`}>
-          {table}.
-        </span>
-        <span className={`font-medium ${
-          isSource ? "text-green-400" : isTarget ? "text-purple-300" : ""
-        }`}>
-          {col}
+        <span className="flex-shrink-0 min-w-0">
+          <span className={`font-mono text-xs ${
+            isSource ? "text-green-500" : isTarget ? "text-purple-400" : "text-muted-foreground"
+          }`}>{table}.</span><span className={`font-medium ${
+            isSource ? "text-green-400" : isTarget ? "text-purple-300" : ""
+          }`}>{col}</span>
         </span>
         {node.edge && <TransformBadge type={node.edge.transform_type} />}
         {node.edge?.expression && (
@@ -139,9 +136,10 @@ export function LineageTree({ targetColId, upstream, downstream }: Props) {
       {/* Selected column */}
       <div className="px-3 py-2.5 bg-accent/30 border-b border-t flex items-center gap-2">
         <span className="text-cyan-500 text-sm">●</span>
-        <span className="font-mono text-xs text-muted-foreground">{table}.</span>
-        <span className="font-semibold">{col}</span>
-        <span className="text-xs text-muted-foreground ml-1">(selected)</span>
+        <span className="font-mono text-xs min-w-0">
+          <span className="text-muted-foreground">{table}.</span><span className="font-semibold">{col}</span>
+        </span>
+        <span className="text-xs text-muted-foreground">(selected)</span>
       </div>
 
       {/* Downstream section */}

@@ -127,7 +127,7 @@ export default function CatalogPage() {
   const selectedConfig = ROLE_CONFIG[selectedRole || "source"];
 
   return (
-    <div className="flex gap-0 h-[calc(100vh-120px)] -mx-6 -mt-6">
+    <div className="flex gap-0 h-[calc(100vh-72px)] -mx-6 -mt-6">
       {/* Sidebar */}
       <div className="w-64 flex-shrink-0 border-r border-border bg-card flex flex-col">
         <div className="p-3 border-b border-border">
@@ -204,7 +204,7 @@ export default function CatalogPage() {
             <div className="flex items-center gap-2.5 mb-5 pb-4 border-b border-border">
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${selectedConfig.dot}`} />
               <h2 className="font-mono text-base font-semibold text-foreground">{selectedTable}</h2>
-              <span className={`text-[10px] font-semibold uppercase tracking-widest ml-1 ${selectedConfig.color}`}>
+              <span className={`text-[10px] font-semibold uppercase tracking-widest ${selectedConfig.color}`}>
                 {selectedRole}
               </span>
               {columns && (
