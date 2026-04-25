@@ -1,0 +1,68 @@
+{
+  "reviewer": "correctness",
+  "findings": [
+    {
+      "title": "Primary fix is correct: src_tbl compared against pre-lowercased set",
+      "severity": "P0",
+      "file": "backend/parsers/sql.py",
+      "line": 739,
+      "why_it_matters": "Before the fix, _lookup() called src.lower() to produce src_tbl, then tested that lowercase string against `temp_views` which retains original case. Any temp view created with uppercase or mixed-case identifiers (common in Databricks notebooks) would fail the membership test, so _lookup() returned None for every such column. Those phantom temp-view source nodes were never short-circuited, corrupting the final lineage graph. The one-line change to `temp_views_lower` fixes the membership check to match the already-lowercased src_tbl.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "suggested_fix": "No further change needed — the fix is correct as written.",
+      "confidence": 0.97,
+      "evidence": [
+        "Line 735: `src = src.lower()` — src_tbl is derived from the lowercased src, so it is always lowercase.",
+        "Line 717: `temp_views_lower = {v.lower() for v in temp_views}` — this is the correct set to test against.",
+        "Original line tested `temp_views` (original-case), causing mismatch for any uppercase/mixed-case view name.",
+        "Iterative chain-resolution loop at lines 771 also uses `temp_views_lower`, so it was already consistent; only _lookup was inconsistent."
+      ],
+      "pre_existing": false
+    },
+    {
+      "title": "Wildcard per-column expansion compares tv_key_tbl to src_tbl.lower() redundantly — but is not broken",
+      "severity": "P3",
+      "file": "backend/parsers/sql.py",
+      "line": 801,
+      "why_it_matters": "At line 801, `tv_key_tbl == src_tbl.lower()` double-lowercases src_tbl (it is already lowercase at this point because line 786 does `.lower()` before the rsplit). The double `.lower()` is harmless, but it shows the inconsistency that led to the original bug — worth noting for hygiene.",
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "suggested_fix": "Change `src_tbl.lower()` to just `src_tbl` at line 801, since src_tbl is already lowercase after line 786's `.lower().rsplit()`.",
+      "confidence": 0.88,
+      "evidence": [
+        "Line 786: `src_tbl = e.source_col.lower().rsplit('.', 1)[0]` — src_tbl is definitively lowercase here.",
+        "Line 801: `tv_key_tbl == src_tbl.lower()` — redundant second lower(), not a bug but misleading."
+      ],
+      "pre_existing": true
+    },
+    {
+      "title": "Test does not verify chained uppercase temp views (chain of two mixed-case views)",
+      "severity": "P2",
+      "file": "backend/tests/test_sql_parser.py",
+      "line": 860,
+      "why_it_matters": "The regression test covers a single-hop uppercase temp view (MY_STAGING → final). The iterative chain-resolution loop at lines 765-782 also uses temp_views_lower for membership; if it had a similar latent bug (it doesn't currently), a chain test would catch it. More importantly, a two-hop chain (RAW_STAGE → MID_STAGE → final, all uppercase) would expose whether the chain loop degrades when intermediate uppercase views are involved. Without this test, a future refactor could reintroduce the bug in the chain path without failing CI.",
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "suggested_fix": "Add a test with two chained uppercase temp views:\n\n```python\ndef test_chained_uppercase_temp_views():\n    sql = \"\\n\".join([\n        \"-- COMMAND ----------\",\n        \"CREATE OR REPLACE TEMPORARY VIEW RAW_STAGE AS\",\n        \"SELECT id FROM uc_dev.raw.src\",\n        \"-- COMMAND ----------\",\n        \"CREATE OR REPLACE TEMPORARY VIEW MID_STAGE AS\",\n        \"SELECT id FROM RAW_STAGE\",\n        \"-- COMMAND ----------\",\n        \"INSERT INTO uc_dev.gold.final SELECT id FROM MID_STAGE\",\n    ])\n    edges = parse_sql(sql, source_file=\"nb.sql\", source_line=1)\n    sources = {e.source_col.lower() for e in edges}\n    assert \"uc_dev.raw.src.id\" in sources\n    assert not any(\"raw_stage\" in s or \"mid_stage\" in s for s in sources)\n```",
+      "confidence": 0.82,
+      "evidence": [
+        "The new test only covers single-hop uppercase view resolution.",
+        "The chain loop at lines 765-782 does use temp_views_lower correctly, but that code path is not exercised by the added test.",
+        "Chain resolution is identified as a key invariant in the codebase CLAUDE.md."
+      ],
+      "pre_existing": false
+    }
+  ],
+  "residual_risks": [
+    "The fix is scoped to _resolve_temp_views. If other call sites pass temp view names to a different membership check without lowercasing first, the same class of bug could recur. A global audit of `in temp_views` (original set) vs `in temp_views_lower` across the file is advisable.",
+    "The chain-resolution loop caps at `len(temp_views_lower) + 1` iterations. If a cycle is inadvertently introduced in temp view references, the loop exits without error and silently produces incomplete lineage. No cycle detection or warning is emitted."
+  ],
+  "testing_gaps": [
+    "No test for chained (2+ hop) uppercase temp views through the iterative resolution loop.",
+    "No test for a mixed-case temp view name where only the wildcard edge (tbl.*) was recorded, exercising the wildcard-fallback branch of _lookup() with a non-lowercase view name.",
+    "No test verifying that a temp view referenced only in a wildcard SELECT * context resolves correctly when the view name is uppercase."
+  ]
+}

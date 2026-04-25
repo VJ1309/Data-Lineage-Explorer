@@ -1,0 +1,112 @@
+{
+  "run_id": "20260418-175342-67f54d29",
+  "reviewer": "security",
+  "reviewed_files": [
+    "backend/api/routes.py",
+    "backend/main.py"
+  ],
+  "findings": [
+    {
+      "id": "SEC-001",
+      "severity": "P2",
+      "title": "Wildcard CORS allows any origin to call all endpoints",
+      "location": "backend/main.py:10-14",
+      "description": "CORSMiddleware is configured with `allow_origins=[\"*\"]`, `allow_methods=[\"*\"]`, `allow_headers=[\"*\"]`. Any web page on the internet can make credentialed-looking cross-origin requests to this API. Although the tool is described as internal-only, this configuration means that if an internal user visits a malicious external site while on the same network as the backend, that site can silently exfiltrate the full lineage graph, file paths, and parse warnings via JavaScript fetch.",
+      "exploit_path": "Attacker hosts page that calls `fetch('http://internal-railway-host/tables')` from an employee's browser. Full response is returned because CORS is wide open.",
+      "recommendation": "Set `allow_origins` to the known Vercel deployment URL(s) (e.g. `[\"https://your-app.vercel.app\"]`). If the backend must also be reachable from localhost during development, add `\"http://localhost:3000\"` as a second allowed origin. Remove the wildcard.",
+      "confidence": 0.95
+    },
+    {
+      "id": "SEC-002",
+      "severity": "P2",
+      "title": "ZIP member filenames (fname) returned verbatim to callers — potential internal path disclosure",
+      "location": "backend/api/routes.py:154-165 (list_source_files), routes.py:228-250 (refresh_source)",
+      "description": "File names stored in `_file_stats` originate directly from ZIP archive member names supplied by the uploader. These are returned as `\"file\": fname` in the `/sources/{source_id}/files` response without sanitization. A malicious or misconfigured uploader can embed absolute or traversal-style paths (e.g. `../../etc/passwd`, `C:\\Windows\\System32\\config`) as ZIP member names. The server does not traverse those paths, so there is no read-side path traversal, but the raw strings are persisted in server memory and echoed back to all callers of the files endpoint, disclosing whatever path the attacker chose to embed. The same strings are also stored in `parse_warnings` (via `w.file`) and returned by `GET /warnings` — widening the disclosure surface.",
+      "exploit_path": "Upload a ZIP with a member named `../../secrets/internal-db-host.sql`. Call `GET /sources/{id}/files` — the response contains `\"file\": \"../../secrets/internal-db-host.sql\"`. No actual file read occurs, but the path string is disclosed to any caller (including cross-origin, see SEC-001).",
+      "recommendation": "Before storing or returning fname, normalize it: strip leading `/`, `..` segments, and drive letters. A simple guard: `fname = fname.lstrip('/').replace('..', '').lstrip('/')`. Alternatively, store only the basename (`os.path.basename(fname)`) if full relative paths are not needed for display.",
+      "confidence": 0.82
+    },
+    {
+      "id": "SEC-003",
+      "severity": "P2",
+      "title": "Git stderr from failed ls-remote may disclose internal network topology or repo structure",
+      "location": "backend/api/routes.py:98-101",
+      "description": "When `git ls-remote` fails, the raw `exc.stderr` from GitPython is forwarded to the HTTP client in the 400 response detail. Git error output can include the remote URL (even after substitution fails), SSH host keys, proxy addresses, NTLM challenge details, or internal DNS names. The code comment says it sanitizes the token-embedded URL, but it only avoids echoing `auth_url`; it forwards whatever Git writes to stderr, which may contain other sensitive strings.",
+      "exploit_path": "POST `/sources` with `source_type=git` and `url=https://internal-git.corp.example.com/secret-repo`. Git's connection failure message (e.g. `fatal: repository 'https://internal-git.corp.example.com/secret-repo/' not found`) is returned verbatim. On an internal network this confirms host existence and repo names.",
+      "recommendation": "Strip or redact the URL from `exc.stderr` before forwarding. Replace the entire URL pattern with `[REDACTED]`, or simply return a generic message: `\"Git remote unreachable or authentication failed\"` without the raw stderr.",
+      "confidence": 0.80
+    },
+    {
+      "id": "SEC-004",
+      "severity": "P3",
+      "title": "No authentication or authorization on any endpoint",
+      "location": "backend/api/routes.py (all routes), backend/main.py",
+      "description": "Every endpoint — including destructive ones (`DELETE /sources/{id}`, `POST /sources/{id}/refresh`) and data-read ones (`GET /warnings`, `GET /lineage`) — is fully unauthenticated. Any caller that can reach the network address can read all parsed lineage data, delete sources, or trigger re-ingestion. The review context notes this is an internal tool with no auth system, so this is recorded as a defense-in-depth gap rather than an active exploit, but it would become P1 if the Railway service URL is ever publicly reachable (Railway services are publicly routed by default unless restricted by a private network or IP allowlist).",
+      "exploit_path": "Railway deployment URL is guessable or leaked (e.g. in Vercel env vars, git history, browser network tab). Anonymous caller enumerates `GET /tables`, `GET /warnings` for full schema + error detail, then calls `DELETE /sources/{id}` to destroy all ingested data.",
+      "recommendation": "Add a shared-secret header check (e.g. `X-Internal-Token`) as a lightweight guard, even for an internal tool. Alternatively, enable Railway's private networking and restrict the backend to VPN/internal access only. At minimum, do not expose the Railway URL publicly.",
+      "confidence": 0.92
+    },
+    {
+      "id": "SEC-005",
+      "severity": "P3",
+      "title": "Unbounded ZIP extraction — no member count or total extracted-size limit",
+      "location": "backend/api/routes.py:81-84 (register_source) and backend/ingestion/upload.py (ingest_zip, not read but implied)",
+      "description": "The upload path enforces a 50 MB ZIP size limit on the compressed bytes, which is good. However, ZIP files can expand to multiples of their compressed size (zip bomb). If `ingest_zip` extracts all members into memory without a decompressed-size or member-count limit, a crafted ZIP could exhaust server memory. This is not directly visible in routes.py but is a realistic risk given the upload pathway.",
+      "exploit_path": "Upload a 1 MB ZIP that decompresses to 1 GB of SQL text. `ingest_zip` loads all content into memory, causing OOM or extreme slowdown.",
+      "recommendation": "In `ingestion/upload.py`, enforce a maximum total decompressed size (e.g. 200 MB) and a maximum file count (e.g. 500 members) before or during extraction. Use `zipfile.ZipFile.infolist()` to check `file_size` before reading.",
+      "confidence": 0.72
+    },
+    {
+      "id": "SEC-006",
+      "severity": "P3",
+      "title": "source_id collision risk due to 8-character UUID truncation",
+      "location": "backend/api/routes.py:63",
+      "description": "`source_id = str(uuid.uuid4())[:8]` truncates a UUID4 to 8 hex characters (32 bits of entropy). With ~50,000 sources the birthday-collision probability reaches ~1%. In an internal tool with low source counts this is negligible, but if source IDs are ever used for access-scoping (e.g. in future auth), a collision would cause one source's data to overwrite another's silently.",
+      "exploit_path": "Not exploitable at current scale. Becomes relevant if source count grows or IDs gain security semantics.",
+      "recommendation": "Use the full UUID (`str(uuid.uuid4())`) or at least 16 characters. The 8-char truncation provides no meaningful UX benefit.",
+      "confidence": 0.65
+    }
+  ],
+  "residual_risks": [
+    {
+      "area": "ingestion/upload.py (not reviewed)",
+      "risk": "ZIP extraction safety (member count, decompressed size, path traversal via ZipSlip) is not visible from routes.py. If ingest_zip uses naive zipfile.extractall(), ZipSlip (path traversal via crafted member names like ../../app/main.py) may overwrite server files.",
+      "recommended_action": "Review ingestion/upload.py specifically for ZipSlip (check that extracted paths are always contained within a temp directory) and decompression bomb limits."
+    },
+    {
+      "area": "ingestion/git.py and ingestion/databricks.py (not reviewed)",
+      "risk": "Git ingestion clones an attacker-controlled URL onto the server filesystem. If the clone path is not isolated in a temp directory with tight permissions, leftover files from previous clones or malicious repo contents (e.g. .git/hooks) could persist.",
+      "recommended_action": "Ensure clones occur in isolated temp directories that are deleted after parsing. Disable git hooks during clone (--no-local, core.hooksPath=/dev/null)."
+    },
+    {
+      "area": "DFS path traversal in _trace_raw_paths",
+      "risk": "max_paths=50 and max_depth=10 cap the DFS, but a highly cyclic graph (theoretically possible if normalization has bugs) could cause the visited-set logic to behave unexpectedly. Not currently exploitable via user input.",
+      "recommended_action": "No action required at this time; existing guards are adequate."
+    }
+  ],
+  "testing_gaps": [
+    {
+      "gap": "No test for CORS behavior with a non-allowlisted origin",
+      "impact": "SEC-001 would not be caught by existing tests if CORS is ever tightened and then accidentally reverted."
+    },
+    {
+      "gap": "No test for ZIP member names containing path-traversal sequences",
+      "impact": "SEC-002 (fname disclosure) and ZipSlip residual risk would not surface in CI."
+    },
+    {
+      "gap": "No test for git ls-remote stderr content in 400 response",
+      "impact": "SEC-003 regression could be introduced silently."
+    },
+    {
+      "gap": "No test for decompression bomb / oversized ZIP contents",
+      "impact": "SEC-005 would require a manual stress test to catch."
+    }
+  ],
+  "summary": {
+    "p0": 0,
+    "p1": 0,
+    "p2": 3,
+    "p3": 3,
+    "highest_priority_action": "Restrict CORS to known Vercel origin(s) (SEC-001) — this is the only finding that requires zero code changes elsewhere and immediately reduces the blast radius of all other findings."
+  }
+}

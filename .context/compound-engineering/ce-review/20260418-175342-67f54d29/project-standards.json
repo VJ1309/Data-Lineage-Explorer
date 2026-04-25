@@ -1,0 +1,100 @@
+{
+  "run_id": "20260418-175342-67f54d29",
+  "reviewer": "project-standards",
+  "checked_at": "2026-04-18T17:53:42Z",
+  "scope": {
+    "changed_files": [
+      "backend/parsers/sql.py",
+      "backend/lineage/engine.py",
+      "backend/lineage/models.py",
+      "backend/api/routes.py",
+      "frontend/app/sources/page.tsx",
+      "frontend/lib/api.ts",
+      "frontend/lib/hooks.ts",
+      "frontend/components/lineage-graph.tsx",
+      "frontend/components/warnings-panel.tsx"
+    ],
+    "standards_sources": [
+      "D:/Python/ClaudeCode/CLAUDE.md",
+      "D:/Python/ClaudeCode/.claude/CLAUDE.md",
+      "D:/Python/ClaudeCode/frontend/CLAUDE.md",
+      "D:/Python/ClaudeCode/frontend/AGENTS.md"
+    ]
+  },
+  "findings": [
+    {
+      "id": "PS-001",
+      "status": "PASS",
+      "rule": "All column IDs split with .rsplit('.', 1), never .split('.', 1)",
+      "details": "Checked all new and changed code in backend/parsers/sql.py and backend/lineage/engine.py. Every split of a column/table identifier uses .rsplit('.', 1) or .rsplit('.', 1)[0]/[1]. No .split('.', 1) call found in changed code. Grep across backend/ confirmed zero violations.",
+      "confidence": 0.98
+    },
+    {
+      "id": "PS-002",
+      "status": "PASS",
+      "rule": "SQLGlot dialect='databricks' required in parsers/sql.py",
+      "details": "The new _parse_merge function delegates expression stringification to _classify_transform (which calls node.sql(dialect='databricks')) and to on_expr.sql(dialect='databricks') in _parse_select_node. All new SQL expression renders in the changed file use dialect='databricks'. sqlglot.parse / sqlglot.parse_one calls at lines 920 and 846 both pass dialect='databricks'.",
+      "confidence": 0.97
+    },
+    {
+      "id": "PS-003",
+      "status": "PASS",
+      "rule": "Frontend API additions must go in lib/api.ts as typed fetch wrappers",
+      "details": "New SourceFile type and api.sources.files() wrapper correctly added to lib/api.ts following the existing apiFetch<T> pattern. No backend URLs hardcoded; all calls route through the BASE = '/api/backend' proxy.",
+      "confidence": 0.99
+    },
+    {
+      "id": "PS-004",
+      "status": "PASS",
+      "rule": "Frontend data fetching must use React Query hooks in lib/hooks.ts",
+      "details": "New useSourceFiles hook added to lib/hooks.ts using useQuery with queryKey, queryFn, and enabled guard. Pattern matches all existing hooks (useSources, useColumns, etc.). Mutations correctly invalidate relevant query keys on success.",
+      "confidence": 0.99
+    },
+    {
+      "id": "PS-005",
+      "status": "PASS",
+      "rule": "Never use NEXT_PUBLIC_ for the backend URL",
+      "details": "Grep across all frontend changed files found zero occurrences of NEXT_PUBLIC_. The new api.sources.files call routes through the existing BASE = '/api/backend' constant which resolves server-side through the Next.js API proxy.",
+      "confidence": 1.0
+    },
+    {
+      "id": "PS-006",
+      "status": "PASS",
+      "rule": "Frontend components must use id.lastIndexOf('.') to split table from column",
+      "details": "lineage-graph.tsx (changed file) defines splitColId() using id.lastIndexOf('.') at line 31, which is correct for 4-part catalog.schema.table.column IDs. warnings-panel.tsx (new file) does not perform any column ID splitting — not applicable. sources/page.tsx uses f.file.split('/') to extract a filename path segment, which is a file system path split, not a column ID split — correct.",
+      "confidence": 0.98
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "RR-001",
+      "severity": "low",
+      "description": "Pre-existing bug in _resolve_temp_views (sql.py line 739): the guard 'src_tbl not in temp_views' compares a lowercased src_tbl against the original (potentially mixed-case) temp_views set rather than temp_views_lower. This is unchanged pre-existing code, out of scope for this review, but could silently skip lookup for mixed-case temp view names in chains.",
+      "file": "backend/parsers/sql.py",
+      "line": 739,
+      "is_new_code": false
+    },
+    {
+      "id": "RR-002",
+      "severity": "low",
+      "description": "The /sources/{source_id}/files endpoint does not invalidate or distinguish between stale stats from a previous refresh cycle and a fresh one. If a source is re-refreshed, old file_stats are replaced (correct), but the endpoint returns an empty list before first refresh rather than surfacing a 'not yet parsed' state to the client. The frontend handles this with 'No parsed files. Refresh the source to parse.' — acceptable but not explicitly tested.",
+      "file": "backend/api/routes.py",
+      "is_new_code": true
+    }
+  ],
+  "testing_gaps": [
+    {
+      "id": "TG-001",
+      "description": "No test covers the /sources/{source_id}/files endpoint. The confidence tier logic (high/medium/low) based on approximate_count, warning_count, and error_files is untested.",
+      "file": "backend/api/routes.py",
+      "recommended_test": "test_routes.py: register + refresh a source with known approximate and certain edges, call GET /sources/{id}/files, assert confidence values are correct for each tier."
+    },
+    {
+      "id": "TG-002",
+      "description": "No test covers MERGE INTO statement parsing in _parse_merge. The WHEN MATCHED THEN UPDATE and WHEN NOT MATCHED THEN INSERT branches are both new code paths with no test coverage.",
+      "file": "backend/parsers/sql.py",
+      "recommended_test": "test_sql_parser.py: add cases for MERGE INTO with aliased source/target, UPDATE SET, and INSERT VALUES branches; assert correct source_col/target_col in returned edges."
+    }
+  ],
+  "overall": "PASS — no CLAUDE.md rule violations found in changed code. Two testing gaps noted for newly introduced logic paths."
+}

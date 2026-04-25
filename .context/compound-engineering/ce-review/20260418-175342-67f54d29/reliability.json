@@ -1,0 +1,158 @@
+{
+  "run_id": "20260418-175342-67f54d29",
+  "reviewer": "reliability",
+  "findings": [
+    {
+      "id": "R-01",
+      "priority": "P0",
+      "confidence": 0.97,
+      "file": "backend/api/routes.py",
+      "location": "list_source_files(), line 162",
+      "title": "Direct key access on stats dict raises KeyError on stale or malformed state",
+      "description": "At line 162, `stats[\"edge_count\"]` performs a direct dict access. The dict is always constructed by the refresh_source path with exactly the keys {edge_count, approximate_count, warning_count}. However, if the server is restarted mid-deployment (state lost) and re-populated by an older code version, or if any future code path creates a _file_stats entry without edge_count, this raises an unhandled KeyError that bubbles up as a 500. There is no try/except around this endpoint. The fix is a one-liner: `stats.get(\"edge_count\", 0)`.",
+      "reproduction": "POST /sources, then PUT stale _file_stats dict without edge_count key (e.g. via direct state manipulation in tests), then GET /sources/{id}/files — raises KeyError.",
+      "fix": "Change `stats[\"edge_count\"]` to `stats.get(\"edge_count\", 0)` at routes.py line 162.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-02",
+      "priority": "P1",
+      "confidence": 0.85,
+      "file": "backend/parsers/sql.py",
+      "location": "_parse_merge(), lines 592-592",
+      "title": "whens.expressions AttributeError if SQLGlot returns non-standard Whens node",
+      "description": "At line 592, after `whens = merge.args.get(\"whens\")` and a None-guard at line 589-590, the code does `for when in whens.expressions`. This assumes the object returned has an .expressions attribute. For a valid Databricks MERGE, SQLGlot (>=20.x) attaches a Whens node that always has .expressions. However, if a future SQLGlot version restructures this, or if a non-Databricks MERGE dialect returns a different node type, this raises AttributeError. Unlike the parse_sql() outer try/except (which guards _parse_file at engine level), _parse_merge is called directly from _parse_single_statement inside the per-statement try/except — so the AttributeError would be caught by _parse_file's broad Exception guard and recorded as a warning, NOT a server crash. Severity is therefore P1 (request returns empty results + warning, not P0 crash) but worth addressing.",
+      "reproduction": "Craft a MERGE statement that causes SQLGlot to return a non-Whens object for the 'whens' key (dialect mismatch or library upgrade).",
+      "fix": "Add `if not hasattr(whens, 'expressions'): return edges` after the None check, or wrap with `getattr(whens, 'expressions', [])` in the for-loop.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-03",
+      "priority": "P1",
+      "confidence": 0.88,
+      "file": "backend/api/routes.py",
+      "location": "refresh_source(), lines 204-226",
+      "title": "Partial state mutation on build_graph_with_warnings exception leaves lineage_graph in inconsistent state",
+      "description": "If `build_graph_with_warnings(records)` raises an unhandled exception (e.g. MemoryError, unexpected data shape that bypasses _parse_file's guard), lines 208-223 have already begun removing old edges from state.lineage_graph and state.raw_graph — but the new graph has not been composed in yet. The result is a permanently empty/partial graph for that source until the next successful refresh. The exception then propagates as a 500 with no cleanup. There is no rollback mechanism. For the in-memory model this is acceptable on a per-source basis, but callers expecting idempotent refresh would see a worse state than before the call.",
+      "reproduction": "Monkey-patch build_graph_with_warnings to raise after old edges are stripped; observe state.lineage_graph missing previously present edges.",
+      "fix": "Compute new_graph before mutating state: move the `build_graph_with_warnings` call and `new_raw_graph` extraction to before the old-edge removal block (lines 204-205 already do this correctly — the issue is that the graph pop at line 205 can itself raise if _raw_graph key is absent, see R-04). Alternatively wrap the entire mutation block in try/except with state restore.",
+      "affects_data_integrity": true
+    },
+    {
+      "id": "R-04",
+      "priority": "P1",
+      "confidence": 0.80,
+      "file": "backend/api/routes.py",
+      "location": "refresh_source(), line 205",
+      "title": "new_graph.graph.pop('_raw_graph', nx.DiGraph()) is safe, but only because of the default — verify no regression",
+      "description": "Line 205: `new_raw_graph: nx.DiGraph = new_graph.graph.pop(\"_raw_graph\", nx.DiGraph())`. The default `nx.DiGraph()` silently swallows a missing key, which is correct. However, if build_graph_with_warnings ever fails to set graph.graph['_raw_graph'] (e.g. if the code path adding it is skipped due to an empty records list), raw_graph gets replaced with an empty graph on line 226 via nx.compose. This is a silent data loss: the old raw_graph entries from OTHER sources are wiped. Currently build_graph_with_warnings always sets the key (line 160 in engine.py), so this is latent, but the absence of an assertion or explicit check makes it a future regression risk.",
+      "reproduction": "Pass an empty records list to refresh_source for a source that contributed raw_graph edges — then check state.raw_graph. Currently safe (compose with empty graph preserves other nodes), so actual severity is P2 at present.",
+      "fix": "No immediate fix needed since nx.compose(state.raw_graph, nx.DiGraph()) is a no-op. Add a comment noting the invariant. Add an assert or log warning if _raw_graph key is absent.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-05",
+      "priority": "P2",
+      "confidence": 0.91,
+      "file": "backend/api/routes.py",
+      "location": "refresh_source(), lines 225-226",
+      "title": "nx.compose replaces state.lineage_graph and state.raw_graph references atomically — but concurrent reads see the old object mid-replace",
+      "description": "Lines 225-226 do `state.lineage_graph = nx.compose(...)` and `state.raw_graph = nx.compose(...)`. Python assignment is atomic at the bytecode level for CPython (GIL-protected), so a concurrent read of state.lineage_graph will see either the old or new object, never a partially constructed one. With a single Uvicorn worker this is fine. With multiple workers (separate processes), each has its own state — no race, but the graphs are permanently divergent across workers. This is an inherent limitation of the in-memory design and is documented in CLAUDE.md. No code fix is needed; flag it only if multi-worker deployment is considered.",
+      "reproduction": "Deploy with --workers 2; upload to one worker, query hits a different worker with empty state.",
+      "fix": "Document in the deployment section that only single-worker mode is supported. No code change needed.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-06",
+      "priority": "P2",
+      "confidence": 0.78,
+      "file": "backend/api/routes.py",
+      "location": "delete_source(), lines 128-140",
+      "title": "delete_source and refresh_source mutate shared graph state without coordination — concurrent calls can produce corrupt graph",
+      "description": "delete_source (line 118) and refresh_source (line 169) both directly remove edges from and add edges to state.lineage_graph and state.raw_graph. If these are called concurrently within the same single-worker async event loop — which cannot happen with synchronous FastAPI handlers and a single thread — this is safe. However, if either endpoint were made async in the future, interleaving would corrupt the graph. Additionally, del state.source_registry[source_id] at line 141 happens after graph mutation; if the graph mutation raises, the registry entry remains but the edges are gone.",
+      "reproduction": "Make delete_source async and add an await; call delete and refresh concurrently for the same source.",
+      "fix": "Add a per-source or global asyncio.Lock if handlers become async. For the synchronous case, no immediate action needed. Ensure del happens before graph mutation or is inside try/finally.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-07",
+      "priority": "P2",
+      "confidence": 0.72,
+      "file": "backend/parsers/sql.py",
+      "location": "_resolve_temp_views(), line 739",
+      "title": "temp_views set checked against lowercased src_tbl using non-lowercased temp_views",
+      "description": "At line 739 inside _lookup(): `if src_tbl not in temp_views:` — but temp_views here is the original (non-lowercased) set passed to _resolve_temp_views, while src_tbl is already lowercased (derived from src.lower() at line 735). The outer function correctly builds temp_views_lower (line 717) but the inner _lookup() function captures the raw temp_views via closure, not temp_views_lower. This means the early-exit guard at line 739 will miss temp view names that contain uppercase characters, causing _lookup() to return None instead of following the wildcard fallback path.",
+      "reproduction": "Create a temp view named 'MyTempView' (mixed case); observe that wildcard fallback inside _lookup() is skipped because 'mytempview' not in {'MyTempView'}.",
+      "fix": "Change line 739 from `if src_tbl not in temp_views:` to `if src_tbl not in temp_views_lower:`. Note: temp_views_lower is in the enclosing scope of _resolve_temp_views and accessible in _lookup() via closure.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-08",
+      "priority": "P3",
+      "confidence": 0.65,
+      "file": "backend/parsers/sql.py",
+      "location": "_subquery_counter, line 170",
+      "title": "Module-level mutable counter is not reset between parse calls — counter grows unboundedly",
+      "description": "_subquery_counter is a module-level list containing a single integer that is incremented each time _next_sub_alias() is called. It is never reset. This means after thousands of parse calls (e.g. continuous refresh of large codebases), the counter keeps growing. The generated aliases like __sub_100000__ are functional but bloat any logs or serialized state. There is no overflow risk in Python, but it is a leaky abstraction for a parse-per-call function.",
+      "reproduction": "Call parse_sql() 10000 times; inspect _subquery_counter[0].",
+      "fix": "Reset the counter inside parse_sql() at the start of each top-level call (when source_cell is None and _resolve_views is True), or use a local counter passed through the call stack.",
+      "affects_data_integrity": false
+    },
+    {
+      "id": "R-09",
+      "priority": "P3",
+      "confidence": 0.63,
+      "file": "backend/api/routes.py",
+      "location": "register_source(), line 108",
+      "title": "Broad Exception silences Databricks SDK errors without logging",
+      "description": "Lines 107-111: `except Exception: raise HTTPException(status_code=400, ...)`. The original exception is swallowed entirely — no logging, no exc chain. For auth failures this is intentional (avoid leaking tokens), but it also hides programming errors in the Databricks SDK path (e.g. import errors if the SDK is not installed) that would look identical to auth failures. The `from databricks.sdk import WorkspaceClient` import at line 104 is inside the except-guarded block, so an ImportError is caught silently and surfaces as 'Databricks authentication failed'.",
+      "reproduction": "Remove the databricks SDK from the environment; register a databricks source — returns 400 with misleading 'authentication failed' message instead of 500 or 'dependency missing'.",
+      "fix": "Separate ImportError (re-raise as 500) from auth exceptions (return 400). At minimum, log the exception type before raising HTTPException.",
+      "affects_data_integrity": false
+    }
+  ],
+  "residual_risks": [
+    {
+      "area": "In-memory state durability",
+      "description": "All lineage state is lost on server restart (Railway auto-deploy). Users who do not re-upload after deployment see an empty graph with no error — no staleness signal to the client.",
+      "mitigation": "Documented in CLAUDE.md and deployment section. Acceptable for current app tier."
+    },
+    {
+      "area": "Multi-worker deployment",
+      "description": "If Railway is configured with more than 1 replica or worker, each process has independent state. Uploads to one worker are invisible to others. No coordination mechanism exists.",
+      "mitigation": "Single-worker assumption is implicit but not enforced. A startup assertion or health-check note would surface this."
+    },
+    {
+      "area": "Graph cycle detection scope",
+      "description": "Cycle detection in build_graph_with_warnings (engine.py line 163) runs only on the new source's graph, not the merged state.lineage_graph. Cycles introduced by cross-source references (source A references a table written by source B, creating a cycle in the global graph) are not detected.",
+      "mitigation": "Low probability in practice. Can be added post-merge by running nx.is_directed_acyclic_graph(state.lineage_graph) after compose."
+    },
+    {
+      "area": "_parse_file broad Exception guard",
+      "description": "engine.py line 34 catches all exceptions from parsers, converting them to ParseWarnings. This is correct for resilience but means programming errors in parsers (not just parse errors) are silently downgraded to warnings. Harder to notice during development.",
+      "mitigation": "Acceptable trade-off for a batch parse pipeline. Consider logging the traceback at DEBUG level."
+    }
+  ],
+  "testing_gaps": [
+    {
+      "gap": "No test for list_source_files with a _file_stats dict missing the edge_count key. A unit test that directly injects a malformed stats dict would have caught R-01.",
+      "priority": "high"
+    },
+    {
+      "gap": "No test for mixed-case temp view names through the full _resolve_temp_views path (R-07). Existing tests may all use lowercase.",
+      "priority": "high"
+    },
+    {
+      "gap": "No test for refresh_source failure partway through (after old edges removed, before new graph composed). Would surface R-03 state corruption.",
+      "priority": "medium"
+    },
+    {
+      "gap": "No test for MERGE statement with a non-standard SQLGlot whens node (e.g. after SQLGlot version bump). Integration test pinning SQLGlot version would reduce risk.",
+      "priority": "medium"
+    },
+    {
+      "gap": "No test for databricks source_type registration when the SDK is not installed — ImportError is silently converted to auth failure (R-09).",
+      "priority": "low"
+    }
+  ]
+}

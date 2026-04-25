@@ -1,0 +1,131 @@
+{
+  "run_id": "20260418-175342-67f54d29",
+  "reviewer": "api-contract",
+  "reviewed_at": "2026-04-18T17:53:42Z",
+  "scope": {
+    "backend": "backend/api/routes.py",
+    "frontend_types": "frontend/lib/api.ts",
+    "frontend_hooks": "frontend/lib/hooks.ts",
+    "frontend_pages": ["frontend/app/sources/page.tsx"],
+    "frontend_components": ["frontend/components/warnings-panel.tsx"],
+    "backend_models": "backend/lineage/models.py"
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "priority": "P3",
+      "category": "PathStep type missing new fields",
+      "description": "The backend `_trace_raw_paths` synthetic step_dict (the no-edge_data branch) now includes `confidence: 'certain'` and `qualified: True`. The frontend `PathStep` type (api.ts lines 94-102) does not include `confidence` or `qualified` fields. The fields will arrive in the JSON response and be silently ignored by the client. No runtime crash, no data loss in current UI (the paths view renders source_col/target_col/transform_type/expression/source_file/source_cell/source_line only), but the type contract is incomplete.",
+      "backend_emits": {
+        "source_col": "str",
+        "target_col": "str",
+        "transform_type": "str | null",
+        "expression": "str | null",
+        "source_file": "str | null",
+        "source_cell": "int | null",
+        "source_line": "int | null",
+        "confidence": "\"certain\" | \"approximate\"",
+        "qualified": "boolean"
+      },
+      "frontend_type": {
+        "source_col": "string",
+        "target_col": "string",
+        "transform_type": "string | null",
+        "expression": "string | null",
+        "source_file": "string | null",
+        "source_cell": "number | null",
+        "source_line": "number | null"
+      },
+      "missing_in_frontend": ["confidence", "qualified"],
+      "severity": "P3",
+      "confidence": 0.98,
+      "remediation": "Add `confidence?: \"certain\" | \"approximate\"; qualified?: boolean;` to the `PathStep` type in frontend/lib/api.ts."
+    },
+    {
+      "id": "F-002",
+      "priority": "P3",
+      "category": "Warning.severity default mismatch — cosmetic but traceable",
+      "description": "The backend `ParseWarning` model defaults `severity` to `'warn'`. The backend refresh route always emits the severity field (line 228: `'severity': w.severity`). The frontend `Warning` type marks `severity` as optional (`severity?: 'info' | 'warn' | 'error'`). This is safe because the field is always present at runtime, but the optional marker means TypeScript code must null-guard unnecessarily. The WarningsPanel already handles the missing case gracefully in `severityOf()` by defaulting to 'warn', so no runtime risk.",
+      "severity": "P3",
+      "confidence": 0.90,
+      "remediation": "Consider marking `severity` as required (`severity: 'info' | 'warn' | 'error'`) in the `Warning` type, since the backend always emits it. Low priority."
+    }
+  ],
+  "verified_contracts": [
+    {
+      "id": "C-001",
+      "contract": "GET /sources/{id}/files",
+      "status": "PASS",
+      "details": "Backend returns `[{file: str, edge_count: int, confidence: 'high'|'medium'|'low'}]`. Frontend SourceFile type matches exactly. api.sources.files function is defined. useSourceFiles hook exists with correct enabled guard. Sources page renders all three fields."
+    },
+    {
+      "id": "C-002",
+      "contract": "LineageEdge.qualified field",
+      "status": "PASS",
+      "details": "Backend LineageEdge model has `qualified: bool = True`. _edge_to_dict emits it. Frontend LineageEdge type has `qualified?: boolean`. The optional marker is appropriate since older edges in memory from pre-change parsers would lack it, and the backend always sets it on the model default. No mismatch."
+    },
+    {
+      "id": "C-003",
+      "contract": "LineageEdge.confidence field",
+      "status": "PASS",
+      "details": "Backend model has `confidence: Literal['certain', 'approximate'] = 'certain'`. _edge_to_dict emits it. Frontend type has `confidence?: 'certain' | 'approximate'`. Matched."
+    },
+    {
+      "id": "C-004",
+      "contract": "Source.warning_count field",
+      "status": "PASS",
+      "details": "Backend register_source initializes `warning_count: 0`. refresh_source sets `entry['warning_count'] = len(new_warnings)`. list_sources strips `_`-prefixed keys only, so warning_count is included. Frontend Source type has `warning_count: number` (required). SourceRow renders it conditionally. No gap."
+    },
+    {
+      "id": "C-005",
+      "contract": "Warning.severity field end-to-end",
+      "status": "PASS",
+      "details": "Backend ParseWarning model has `severity: Literal['info','warn','error'] = 'warn'`. refresh_source emits `severity: w.severity` in parse_warnings list. get_warnings returns state.parse_warnings directly. Frontend Warning type has `severity?: 'info'|'warn'|'error'`. WarningsPanel uses severityOf() to normalize missing values. Color-coding works for all three tiers."
+    },
+    {
+      "id": "C-006",
+      "contract": "useRefreshSource cache invalidation after new endpoint",
+      "status": "PASS",
+      "details": "useRefreshSource invalidates ['sources'], ['tables'], and ['warnings'] query keys. The new ['source-files', sourceId] query key is not invalidated on refresh. This is an omission: after a refresh, the file list for the source will be stale until the component remounts or the user navigates away. Flagged as residual risk rather than P1 because useSourceFiles data is only shown when expanded, and React Query's default staleTime will cause a background refetch on next focus."
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "R-001",
+      "description": "useRefreshSource does not invalidate the ['source-files', sourceId] query key. After a source refresh, an expanded SourceFileList will show stale file stats until the query goes stale and refetches (default staleTime=0 means it will refetch on next window focus, but not immediately on mutation success). In practice, the data will update quickly, but there is a brief inconsistency window.",
+      "priority": "P3",
+      "remediation": "Add `qc.invalidateQueries({ queryKey: ['source-files'] })` to the useRefreshSource onSuccess callback in hooks.ts."
+    },
+    {
+      "id": "R-002",
+      "description": "The backend list_source_files endpoint accesses `stats['edge_count']` without a .get() default (line 162). If a file appears only in error_files but not in file_stats (i.e., the warning was emitted for a file that produced zero edges and was added to file_stats only via the warning branch), edge_count will be present because the warning branch initializes `{'edge_count': 0, ...}`. This path appears safe, but is fragile if the initialization logic changes.",
+      "priority": "P3",
+      "remediation": "Use `stats.get('edge_count', 0)` for defensive access in list_source_files."
+    }
+  ],
+  "testing_gaps": [
+    {
+      "id": "T-001",
+      "description": "No test verifies the GET /sources/{id}/files endpoint returns the correct confidence tier logic (high/medium/low based on approximate_count, warning_count, error_files membership). The three-way branch is entirely untested via the HTTP layer.",
+      "affected_contract": "C-001"
+    },
+    {
+      "id": "T-002",
+      "description": "No test verifies that warning_count is correctly set in list_sources after a refresh. The counter is only set at refresh time; a source registered but never refreshed has warning_count=0 (correct), but there is no test confirming it increments correctly on a second refresh that finds new warnings.",
+      "affected_contract": "C-004"
+    },
+    {
+      "id": "T-003",
+      "description": "The synthetic step_dict in _trace_raw_paths (no-edge branch emitting confidence and qualified) is not covered by any path-tracing test that inspects those specific fields on the returned steps.",
+      "affected_contract": "F-001"
+    }
+  ],
+  "summary": {
+    "total_findings": 2,
+    "p1": 0,
+    "p2": 0,
+    "p3": 2,
+    "overall_verdict": "PASS with minor gaps",
+    "notes": "All five primary contract items from the review context are correctly plumbed end-to-end. The only gaps are: PathStep type missing confidence/qualified (data arrives silently ignored), Warning.severity unnecessarily optional, a stale-query invalidation omission in useRefreshSource, and three untested branches."
+  }
+}
