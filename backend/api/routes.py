@@ -349,12 +349,15 @@ def get_lineage(table: str, column: str):
     }
 
 
-def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50, max_depth: int = 10) -> tuple[list[dict], bool]:
+def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50) -> tuple[list[dict], bool]:
     """DFS backward from col_id, following both named and wildcard edges.
 
     Wildcard edges (tbl.* → other.*) are synthesized into named column edges
     using the column name being traced at each depth level, so the full
     source→temp_view→target chain is reconstructed correctly.
+
+    Cycles are prevented by the per-path visited set (with backtracking).
+    No depth limit — the full chain is always returned.
     """
 
     def step_dict(src: str, tgt: str, edge_data) -> dict:
@@ -388,9 +391,9 @@ def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50, ma
     all_paths: list[list[dict]] = []
     truncated = False
 
-    def dfs(node: str, steps_so_far: list[dict], visited: set[str], depth: int) -> None:
+    def dfs(node: str, steps_so_far: list[dict], visited: set[str]) -> None:
         nonlocal truncated
-        if depth > max_depth or truncated:
+        if truncated:
             return
         preds = get_preds(node, visited)
         if not preds:
@@ -404,10 +407,10 @@ def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50, ma
                 return
             step = step_dict(pred, tgt, edge_data)
             visited.add(pred)
-            dfs(pred, steps_so_far + [step], visited, depth + 1)
+            dfs(pred, steps_so_far + [step], visited)
             visited.discard(pred)
 
-    dfs(col_id, [], {col_id}, 0)
+    dfs(col_id, [], {col_id})
     return all_paths, truncated
 
 

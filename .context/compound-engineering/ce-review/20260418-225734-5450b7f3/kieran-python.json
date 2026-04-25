@@ -1,0 +1,63 @@
+{
+  "reviewer": "kieran-python",
+  "run_id": "20260418-225734-5450b7f3",
+  "findings": [
+    {
+      "id": "KP-001",
+      "title": "Parameter type annotation uses original-case set but internal logic requires lowered set — `temp_views` parameter is never consumed after normalisation",
+      "description": "The function signature declares `temp_views: set[str]` and the only post-normalisation use of the raw `temp_views` is the early-exit guard on line 711 (`if not temp_views`). All actual membership checks throughout the function body use `temp_views_lower`. This is correct behaviour after the fix, but the parameter name is now misleading: callers could reasonably assume the set is used as-is for lookups. Renaming the parameter to something like `temp_view_names` and documenting that it is normalised internally would prevent future contributors from re-introducing the original-case lookup bug.",
+      "location": "backend/parsers/sql.py:695-698",
+      "category": "naming / readability",
+      "pre_existing": true,
+      "confidence": 0.82,
+      "suggested_fix": "Rename parameter to `temp_view_names: set[str]` and update the two call sites in `parse_sql` (lines 915, 942). Add a one-line docstring note that the set is normalised to lowercase internally."
+    },
+    {
+      "id": "KP-002",
+      "title": "Early-exit guard uses original-case `temp_views` — inconsistency with rest of function (low risk, but latent)",
+      "description": "Line 711 checks `if not temp_views` using the raw parameter before `temp_views_lower` is built. If a caller somehow passes a non-empty set whose `.lower()` projection collapses to an empty set (not currently possible with `set[str]`), the guard would fail to short-circuit while `temp_views_lower` would be empty, leading to silent no-ops further in. In practice this cannot happen with the current type, but the inconsistency between the guard and all downstream checks is a readability hazard.",
+      "location": "backend/parsers/sql.py:711",
+      "category": "structural clarity",
+      "pre_existing": true,
+      "confidence": 0.65,
+      "suggested_fix": "Move the early-exit to after `temp_views_lower` is built: `if not temp_views_lower: return edges`. This makes the guard consistent with every other membership test in the function."
+    },
+    {
+      "id": "KP-003",
+      "title": "Regression test does not assert exact target column names — only asserts set membership of source tables",
+      "description": "The new test `test_temp_view_with_mixed_case_in_databricks_notebook` (line 839) checks that `MY_STAGING` does not appear in sources and that the two source columns from `uc_dev.raw.source_tbl` are present. It does NOT assert that target columns (`uc_dev.gold.final.id`, `uc_dev.gold.final.val`) are present. The test therefore cannot catch a regression where the fix resolves the source correctly but silently drops the edge before writing to the target — something that could happen if the wildcard-expansion path emits zero resolved edges.",
+      "location": "backend/tests/test_sql_parser.py:853-860",
+      "category": "testing gap",
+      "pre_existing": false,
+      "confidence": 0.80,
+      "suggested_fix": "Add assertions for targets:\n```python\nassert \"uc_dev.gold.final.id\" in targets\nassert \"uc_dev.gold.final.val\" in targets\n```\n(The variables `sources` and `targets` are already computed on lines 854-855, so adding these two lines costs nothing.)"
+    },
+    {
+      "id": "KP-004",
+      "title": "The one-line fix is correct and complete for the described bug — no other original-case `temp_views` membership checks remain inside `_resolve_temp_views`",
+      "description": "After the fix, every membership test inside `_resolve_temp_views` — lines 723, 739, 764, 771, 786, 787, 789, 792, 801 — uses `temp_views_lower`. The scan found no residual `temp_views` (original-case) lookups inside the function body beyond the early-exit guard on line 711 (which is boolean truthiness, not a membership test, so it is semantically safe). The fix is minimal and correct.",
+      "location": "backend/parsers/sql.py:739",
+      "category": "correctness confirmation",
+      "pre_existing": false,
+      "confidence": 0.97,
+      "suggested_fix": null
+    }
+  ],
+  "residual_risks": [
+    {
+      "description": "Chain-resolution loop bound uses `len(temp_views_lower)` (line 764). If a deeply nested chain of N temp views references each other, the bound is N+1, which is correct. However, because `tv_sources` is mutated in-place during iteration, a cycle in temp view definitions (V1 → V2 → V1) would not terminate by `changed=False` and would spin for all N+1 iterations silently corrupting `tv_sources`. There is no cycle detection. This is pre-existing and out of scope for this diff, but worth noting.",
+      "severity": "low",
+      "pre_existing": true
+    },
+    {
+      "description": "The wildcard-fallback path in `_lookup` (lines 752-760) substitutes `col_name` from the lookup key into wildcard source strings. If a wildcard source is not itself a wildcard (i.e. it is a concrete `tbl.col`), the substitution is skipped (`s` is returned as-is). This means a mixed wildcard/named source in `wildcard_sources` will silently emit the wrong column when the wildcard branch fires for a named lookup. This is pre-existing and not touched by this diff.",
+      "severity": "low",
+      "pre_existing": true
+    }
+  ],
+  "testing_gaps": [
+    "No test covers the iterative chain resolution path (V1 → V2 → V3 → real_table) with mixed-case view names across the chain; only a single-hop mixed-case case is tested.",
+    "No test for an UPPERCASE temp view name defined and consumed entirely within a single SQL string (non-Databricks-notebook path via `parse_sql` with `_resolve_views=True`).",
+    "Target column presence in the new regression test `test_temp_view_with_mixed_case_in_databricks_notebook` is not asserted (see KP-003)."
+  ]
+}

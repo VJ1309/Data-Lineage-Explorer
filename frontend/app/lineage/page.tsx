@@ -6,8 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLineage, usePaths } from "@/lib/hooks";
 import { LineageGraph } from "@/components/lineage-graph";
 import { LineageTree } from "@/components/lineage-tree";
-import { CodeInspector } from "@/components/code-inspector";
-import { PathInspector } from "@/components/path-inspector";
+import { TransformInspector } from "@/components/transform-inspector";
 import { GitBranch } from "lucide-react";
 
 function LineageContent() {
@@ -15,7 +14,7 @@ function LineageContent() {
   const table = params.get("table");
   const column = params.get("column");
   const { data, isLoading, error } = useLineage(table, column);
-  const { data: pathsData, isLoading: pathsLoading } = usePaths(table, column);
+  const { data: pathsData, isLoading: pathsLoading, error: pathsError } = usePaths(table, column);
 
   if (!table || !column) {
     return (
@@ -73,8 +72,7 @@ function LineageContent() {
         <TabsList>
           <TabsTrigger value="graph">⬡ Graph</TabsTrigger>
           <TabsTrigger value="tree">≡ Tree</TabsTrigger>
-          <TabsTrigger value="code">&lt;/&gt; Code</TabsTrigger>
-          <TabsTrigger value="path">⇢ Path</TabsTrigger>
+          <TabsTrigger value="transform">⇢ Transform</TabsTrigger>
         </TabsList>
 
         <TabsContent value="graph" className="pt-4">
@@ -89,15 +87,15 @@ function LineageContent() {
           <LineageTree targetColId={data.target} upstream={data.upstream} downstream={data.downstream} />
         </TabsContent>
 
-        <TabsContent value="code" className="pt-4">
-          <CodeInspector targetColId={data.target} edges={data.upstream} />
-        </TabsContent>
-
-        <TabsContent value="path" className="pt-4">
-          {pathsLoading && <p className="text-sm text-muted-foreground">Loading paths…</p>}
-          {pathsData && (
-            <PathInspector paths={pathsData.paths} truncated={pathsData.truncated} />
-          )}
+        <TabsContent value="transform" className="pt-4">
+          <TransformInspector
+            key={`${table}.${column}`}
+            paths={pathsData?.paths ?? []}
+            truncated={pathsData?.truncated ?? false}
+            isLoading={pathsLoading}
+            isError={!!pathsError}
+            errorMessage={(pathsError as Error)?.message}
+          />
         </TabsContent>
       </Tabs>
     </div>

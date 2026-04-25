@@ -1,0 +1,63 @@
+{
+  "reviewer": "project-standards",
+  "findings": [
+    {
+      "id": "PS-001",
+      "severity": "info",
+      "confidence": 0.95,
+      "pre_existing": false,
+      "file": "backend/parsers/sql.py",
+      "location": "_resolve_temp_views._lookup (line 739)",
+      "title": "rsplit used correctly for 4-part column ID splitting",
+      "description": "The fix uses `src.rsplit('.', 1)[0]` to extract the table portion from a column ID. This correctly follows the key invariant in CLAUDE.md: 'Always use .rsplit(\".\", 1) to split table from column — never .split(\".\", 1), which would split at the catalog dot instead.' The fix is consistent with how the rest of _resolve_temp_views splits IDs (lines 722, 786, 787).",
+      "standard": "CLAUDE.md § Key invariant — naming convention",
+      "verdict": "COMPLIANT"
+    },
+    {
+      "id": "PS-002",
+      "severity": "info",
+      "confidence": 0.92,
+      "pre_existing": false,
+      "file": "backend/parsers/sql.py",
+      "location": "_resolve_temp_views (lines 717, 739)",
+      "title": "Lowercasing strategy is consistent with documented case-insensitive identifier handling",
+      "description": "The fix changes the lookup on line 739 from `temp_views` (original-case set) to `temp_views_lower` (lowercased set). The comment on line 714–717 explicitly documents the intent: 'Normalize temp_views to lowercase — Databricks identifiers are case-insensitive.' Using `temp_views_lower` in _lookup aligns with how all other membership tests in the function already operate (lines 723, 771, 789, 792, 801). No standards violation.",
+      "standard": "CLAUDE.md § Parsers (parsers/sql.py) — dialect=databricks, temp view resolution",
+      "verdict": "COMPLIANT"
+    },
+    {
+      "id": "PS-003",
+      "severity": "low",
+      "confidence": 0.80,
+      "pre_existing": false,
+      "file": "backend/tests/test_sql_parser.py",
+      "location": "test_temp_view_with_mixed_case_in_databricks_notebook (line 854)",
+      "title": "Test assertion uses .lower() on source_col before membership check — masks residual casing bugs",
+      "description": "The test lowercases `e.source_col` before building the `sources` set, then asserts lowercase values. However, the parser is expected to return column IDs in 4-part `catalog.schema.table.column` form (CLAUDE.md § Key invariant — naming convention). If a future regression returned IDs in uppercase, this test would still pass. A stronger assertion would compare against the raw (un-lowercased) `e.source_col` directly, or at minimum assert the exact casing the engine is documented to produce. This does not violate a stated standard, but it weakens regression coverage for the invariant the fix is meant to protect.",
+      "standard": "CLAUDE.md § Key invariant — naming convention (4-part column IDs)",
+      "verdict": "ADVISORY"
+    },
+    {
+      "id": "PS-004",
+      "severity": "info",
+      "confidence": 0.75,
+      "pre_existing": false,
+      "file": "backend/tests/test_sql_parser.py",
+      "location": "test_temp_view_with_mixed_case_in_databricks_notebook (line 844–852)",
+      "title": "Test SQL string does not include Databricks notebook header line",
+      "description": "The simulated notebook SQL begins with '-- COMMAND ----------' but omits the leading '-- Databricks notebook source' header. _split_databricks_sql() filters out the header but does not require it. The split logic triggers on _DATABRICKS_SQL_SEP appearing in the string, so the test correctly exercises the Databricks cell-split path. No standards violation; just noting the test deviates slightly from a real exported notebook.",
+      "standard": "CLAUDE.md § Parsers (parsers/sql.py) — Detects Databricks .sql notebook format",
+      "verdict": "COMPLIANT"
+    }
+  ],
+  "residual_risks": [
+    "The one-line fix corrects the `_lookup` inner function but does not add a dedicated unit test for _resolve_temp_views in isolation (all coverage goes through parse_sql). If _resolve_temp_views is ever extracted or refactored, the regression test would not directly cover the corrected branch.",
+    "Chains of mixed-case temp views (e.g. VIEW_A references VIEW_B which references base table) are not exercised by the new test. The iterative resolution loop (lines 765–781) uses `temp_views_lower` consistently, so chains should work, but there is no explicit test coverage for this scenario.",
+    "The fix lowercases keys in tv_sources but does not lowercase the emitted `source_col` / `target_col` values on resolved edges (they are taken from original-case edge fields). If downstream consumers perform case-sensitive comparisons against these IDs, mixed-case inputs could still cause mismatches — this is a pre-existing characteristic of the design, not introduced by this diff."
+  ],
+  "testing_gaps": [
+    "No test for chained mixed-case temp views (A → B → base_table where both A and B are uppercase/mixed).",
+    "No test asserting the exact (un-lowercased) output column ID format, which is the documented invariant (4-part catalog.schema.table.column). Existing assertion uses .lower() on both sides, reducing fidelity.",
+    "No test for the case where the consumer SELECT references the temp view with a different case than the CREATE (e.g. CREATE TEMPORARY VIEW my_staging ... then SELECT FROM MY_STAGING — which is the exact scenario fixed, but the test uses the same uppercase string in both the CREATE and SELECT)."
+  ]
+}
