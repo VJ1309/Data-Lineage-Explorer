@@ -1,6 +1,6 @@
 "use client";
 import { useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLineage, usePaths } from "@/lib/hooks";
@@ -13,8 +13,9 @@ function LineageContent() {
   const params = useSearchParams();
   const table = params.get("table");
   const column = params.get("column");
+  const [transformActivated, setTransformActivated] = useState(false);
   const { data, isLoading, error } = useLineage(table, column);
-  const { data: pathsData, isLoading: pathsLoading, error: pathsError } = usePaths(table, column);
+  const { data: pathsData, isLoading: pathsLoading, error: pathsError } = usePaths(table, column, transformActivated);
 
   if (!table || !column) {
     return (
@@ -68,7 +69,7 @@ function LineageContent() {
         </div>
       </div>
 
-      <Tabs defaultValue="graph">
+      <Tabs defaultValue="graph" onValueChange={(v) => { if (v === "transform") setTransformActivated(true); }}>
         <TabsList>
           <TabsTrigger value="graph">⬡ Graph</TabsTrigger>
           <TabsTrigger value="tree">≡ Tree</TabsTrigger>

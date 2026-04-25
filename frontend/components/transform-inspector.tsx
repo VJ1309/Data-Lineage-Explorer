@@ -25,9 +25,9 @@ const VERB_MAP: Record<string, string> = {
 };
 
 function colLabel(colId: string) {
-  const parts = colId.split(".");
-  const col = parts.at(-1) ?? colId;
-  const tbl = parts.at(-2) ?? "";
+  const dot = colId.lastIndexOf(".");
+  const col = dot === -1 ? colId : colId.slice(dot + 1);
+  const tbl = dot === -1 ? "" : colId.slice(0, dot);
   return { col, tbl, full: colId };
 }
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from lineage.engine import build_graph_with_warnings
 from lineage.engine import upstream as engine_upstream
 from lineage.engine import downstream as engine_downstream
+from lineage.engine import trace_paths as engine_trace_paths
 from lineage.models import ParseWarning
 from ingestion.upload import ingest_zip
 import state
@@ -26,6 +27,24 @@ def _edge_to_dict(edge) -> dict:
         "confidence": edge.confidence,
         "qualified": edge.qualified,
     }
+
+
+def _remove_source_files(files: set[str]) -> None:
+    """Remove all edges contributed by `files` from both graphs, then drop orphan nodes."""
+    if not files:
+        return
+    edges = [(u, v) for u, v, d in state.lineage_graph.edges(data=True)
+             if d.get("data") and d["data"].source_file in files]
+    state.lineage_graph.remove_edges_from(edges)
+    state.lineage_graph.remove_nodes_from(
+        [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
+    )
+    raw_edges = [(u, v) for u, v, d in state.raw_graph.edges(data=True)
+                 if d.get("data") and d["data"].source_file in files]
+    state.raw_graph.remove_edges_from(raw_edges)
+    state.raw_graph.remove_nodes_from(
+        [n for n in state.raw_graph.nodes() if state.raw_graph.degree(n) == 0]
+    )
 
 
 def _graph_to_payload(graph: nx.DiGraph, col_id: str) -> dict:
@@ -119,25 +138,9 @@ async def register_source(
 def delete_source(source_id: str):
     if source_id not in state.source_registry:
         raise HTTPException(status_code=404, detail="Source not found")
-    # Remove this source's contributions from lineage graph
     entry = state.source_registry.get(source_id)
     if entry:
-        old_files = entry.get("_parsed_files", set())
-        if old_files:
-            edges_to_remove = [
-                (u, v) for u, v, d in state.lineage_graph.edges(data=True)
-                if d.get("data") and d["data"].source_file in old_files
-            ]
-            state.lineage_graph.remove_edges_from(edges_to_remove)
-            orphan_nodes = [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
-            state.lineage_graph.remove_nodes_from(orphan_nodes)
-            raw_edges_to_remove = [
-                (u, v) for u, v, d in state.raw_graph.edges(data=True)
-                if d.get("data") and d["data"].source_file in old_files
-            ]
-            state.raw_graph.remove_edges_from(raw_edges_to_remove)
-            raw_orphans = [n for n in state.raw_graph.nodes() if state.raw_graph.degree(n) == 0]
-            state.raw_graph.remove_nodes_from(raw_orphans)
+        _remove_source_files(entry.get("_parsed_files", set()))
     del state.source_registry[source_id]
     return {"ok": True}
 
@@ -205,22 +208,7 @@ def refresh_source(source_id: str):
     new_raw_graph: nx.DiGraph = new_graph.graph.pop("_raw_graph", nx.DiGraph())
 
     # Remove old contributions from this source before adding new ones
-    old_files = entry.get("_parsed_files", set())
-    if old_files:
-        edges_to_remove = [
-            (u, v) for u, v, d in state.lineage_graph.edges(data=True)
-            if d.get("data") and d["data"].source_file in old_files
-        ]
-        state.lineage_graph.remove_edges_from(edges_to_remove)
-        orphan_nodes = [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
-        state.lineage_graph.remove_nodes_from(orphan_nodes)
-        raw_edges_to_remove = [
-            (u, v) for u, v, d in state.raw_graph.edges(data=True)
-            if d.get("data") and d["data"].source_file in old_files
-        ]
-        state.raw_graph.remove_edges_from(raw_edges_to_remove)
-        raw_orphans = [n for n in state.raw_graph.nodes() if state.raw_graph.degree(n) == 0]
-        state.raw_graph.remove_nodes_from(raw_orphans)
+    _remove_source_files(entry.get("_parsed_files", set()))
 
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
@@ -349,75 +337,10 @@ def get_lineage(table: str, column: str):
     }
 
 
-def _trace_raw_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50) -> tuple[list[dict], bool]:
-    """DFS backward from col_id, following both named and wildcard edges.
-
-    Wildcard edges (tbl.* → other.*) are synthesized into named column edges
-    using the column name being traced at each depth level, so the full
-    source→temp_view→target chain is reconstructed correctly.
-
-    Cycles are prevented by the per-path visited set (with backtracking).
-    No depth limit — the full chain is always returned.
-    """
-
-    def step_dict(src: str, tgt: str, edge_data) -> dict:
-        if edge_data:
-            return {**_edge_to_dict(edge_data), "source_col": src, "target_col": tgt}
-        return {"source_col": src, "target_col": tgt, "transform_type": None,
-                "expression": None, "source_file": None, "source_cell": None,
-                "source_line": None, "confidence": "certain", "qualified": True}
-
-    def get_preds(node: str, visited: set[str]) -> list[tuple[str, str, object]]:
-        """Return (pred_node, target_node, edge_data) for all effective predecessors."""
-        result = []
-        if node in raw_graph:
-            for pred in raw_graph.predecessors(node):
-                if pred not in visited:
-                    result.append((pred, node, raw_graph.edges[pred, node].get("data")))
-        # Wildcard expansion: if tbl.col, check tbl.* predecessors
-        if "." in node:
-            tbl, col = node.rsplit(".", 1)
-            wc = f"{tbl}.*"
-            if wc in raw_graph and wc not in visited:
-                for pred_wc in raw_graph.predecessors(wc):
-                    if pred_wc in visited:
-                        continue
-                    e = raw_graph.edges[pred_wc, wc].get("data")
-                    pred_named = f"{pred_wc[:-2]}.{col}" if pred_wc.endswith(".*") else pred_wc
-                    if pred_named not in visited:
-                        result.append((pred_named, node, e))
-        return result
-
-    all_paths: list[list[dict]] = []
-    truncated = False
-
-    def dfs(node: str, steps_so_far: list[dict], visited: set[str]) -> None:
-        nonlocal truncated
-        if truncated:
-            return
-        preds = get_preds(node, visited)
-        if not preds:
-            if steps_so_far:
-                all_paths.append(list(reversed(steps_so_far)))
-                if len(all_paths) >= max_paths:
-                    truncated = True
-            return
-        for pred, tgt, edge_data in preds:
-            if truncated:
-                return
-            step = step_dict(pred, tgt, edge_data)
-            visited.add(pred)
-            dfs(pred, steps_so_far + [step], visited)
-            visited.discard(pred)
-
-    dfs(col_id, [], {col_id})
-    return all_paths, truncated
-
-
 @router.get("/lineage/paths")
 def get_lineage_paths(table: str, column: str):
     col_id = f"{table}.{column}"
-    paths, truncated = _trace_raw_paths(state.raw_graph, col_id)
+    paths, truncated = engine_trace_paths(state.raw_graph, col_id)
     return {"target": col_id, "paths": [{"steps": p} for p in paths], "truncated": truncated}
 
 

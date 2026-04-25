@@ -61,11 +61,11 @@ export function useLineage(table: string | null, column: string | null) {
   });
 }
 
-export function usePaths(table: string | null, column: string | null) {
+export function usePaths(table: string | null, column: string | null, enabled = true) {
   return useQuery({
     queryKey: ["paths", table, column],
     queryFn: () => api.paths(table!, column!),
-    enabled: table !== null && column !== null,
+    enabled: enabled && table !== null && column !== null,
   });
 }
 

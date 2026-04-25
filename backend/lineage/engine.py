@@ -224,3 +224,78 @@ def downstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
                 visited_nodes.add(succ)
                 queue.append(succ)
     return edges
+
+
+def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 50) -> tuple[list[list[dict]], bool]:
+    """DFS backward from col_id, following both named and wildcard edges.
+
+    Wildcard edges (tbl.* → other.*) are synthesized into named column edges
+    using the column name being traced at each depth level, so the full
+    source→temp_view→target chain is reconstructed correctly.
+
+    Cycles are prevented by the per-path visited set (with backtracking).
+    No depth limit — the full chain is always returned.
+    """
+
+    def step_dict(src: str, tgt: str, edge_data) -> dict:
+        if edge_data:
+            return {
+                "source_col": src,
+                "target_col": tgt,
+                "transform_type": edge_data.transform_type,
+                "expression": edge_data.expression,
+                "source_file": edge_data.source_file,
+                "source_cell": edge_data.source_cell,
+                "source_line": edge_data.source_line,
+                "confidence": edge_data.confidence,
+                "qualified": edge_data.qualified,
+            }
+        return {"source_col": src, "target_col": tgt, "transform_type": None,
+                "expression": None, "source_file": None, "source_cell": None,
+                "source_line": None, "confidence": "certain", "qualified": True}
+
+    def get_preds(node: str, visited: set[str]) -> list[tuple[str, str, object]]:
+        """Return (pred_node, target_node, edge_data) for all effective predecessors."""
+        result = []
+        if node in raw_graph:
+            for pred in raw_graph.predecessors(node):
+                if pred not in visited:
+                    result.append((pred, node, raw_graph.edges[pred, node].get("data")))
+        # Wildcard expansion: if tbl.col, check tbl.* predecessors
+        if "." in node:
+            tbl, col = node.rsplit(".", 1)
+            wc = f"{tbl}.*"
+            if wc in raw_graph and wc not in visited:
+                for pred_wc in raw_graph.predecessors(wc):
+                    if pred_wc in visited:
+                        continue
+                    e = raw_graph.edges[pred_wc, wc].get("data")
+                    pred_named = f"{pred_wc[:-2]}.{col}" if pred_wc.endswith(".*") else pred_wc
+                    if pred_named not in visited:
+                        result.append((pred_named, node, e))
+        return result
+
+    all_paths: list[list[dict]] = []
+    truncated = False
+
+    def dfs(node: str, steps_so_far: list[dict], visited: set[str]) -> None:
+        nonlocal truncated
+        if truncated:
+            return
+        preds = get_preds(node, visited)
+        if not preds:
+            if steps_so_far:
+                all_paths.append(list(reversed(steps_so_far)))
+                if len(all_paths) >= max_paths:
+                    truncated = True
+            return
+        for pred, tgt, edge_data in preds:
+            if truncated:
+                return
+            step = step_dict(pred, tgt, edge_data)
+            visited.add(pred)
+            dfs(pred, steps_so_far + [step], visited)
+            visited.discard(pred)
+
+    dfs(col_id, [], {col_id})
+    return all_paths, truncated
