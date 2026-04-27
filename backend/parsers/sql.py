@@ -2,6 +2,8 @@
 from __future__ import annotations
 import re
 import sqlglot
+
+_TVF_SANITIZE_RE = re.compile(r'[^a-zA-Z0-9_]')
 import sqlglot.expressions as exp
 from sqlglot import tokens
 from lineage.models import LineageEdge
@@ -227,6 +229,15 @@ def _process_subquery(
                 ))
 
 
+def _tvf_synthetic_name(table_node: exp.Table) -> str:
+    """Return a safe identifier for a table-valued function source (read_files, cloud_files, etc.)."""
+    fn_expr = table_node.this
+    fn_args = fn_expr.expressions
+    path_str = next((a.this for a in fn_args if isinstance(a, exp.Literal)), None)
+    raw_name = path_str or fn_expr.name or "tvf"
+    return _TVF_SANITIZE_RE.sub('_', raw_name).strip('_') or "tvf"
+
+
 def _get_statement_body(statement: exp.Expression) -> exp.Expression | None:
     """Return the query body (SELECT or UNION) stripping INSERT/CREATE wrapper."""
     if isinstance(statement, exp.Select):
@@ -262,12 +273,7 @@ def _parse_select_node(
     source_tables: list[str] = []
     from_table = from_clause.this
     if isinstance(from_table, exp.Table) and isinstance(from_table.this, exp.Anonymous):
-        # Table-valued function: read_files(), cloud_files(), etc.
-        fn_expr = from_table.this
-        fn_args = fn_expr.expressions
-        path_str = next((a.this for a in fn_args if isinstance(a, exp.Literal)), None)
-        raw_name = path_str or fn_expr.name or "tvf"
-        synthetic = re.sub(r'[^a-zA-Z0-9_]', '_', raw_name).strip('_') or "tvf"
+        synthetic = _tvf_synthetic_name(from_table)
         alias = from_table.alias
         if alias:
             alias_map[alias] = synthetic
@@ -288,11 +294,7 @@ def _parse_select_node(
     for join in (select_node.args.get("joins") or []):
         jtable = join.this
         if isinstance(jtable, exp.Table) and isinstance(jtable.this, exp.Anonymous):
-            fn_expr = jtable.this
-            fn_args = fn_expr.expressions
-            path_str = next((a.this for a in fn_args if isinstance(a, exp.Literal)), None)
-            raw_name = path_str or fn_expr.name or "tvf"
-            synthetic = re.sub(r'[^a-zA-Z0-9_]', '_', raw_name).strip('_') or "tvf"
+            synthetic = _tvf_synthetic_name(jtable)
             alias = jtable.alias
             if alias:
                 alias_map[alias] = synthetic
@@ -397,14 +399,12 @@ def _parse_select_node(
                 qualified=qualified,
             ))
 
-    # WHERE → __filter__ edges. Emit one edge per distinct column reference
-    # in the predicate to target.__filter__ so consumers can see which columns
-    # gated the row selection (predicate lineage, not column lineage).
-    where_clause = select_node.args.get("where")
-    if where_clause is not None:
-        filter_expr_str = where_clause.sql(dialect="databricks")
-        seen_filter_src: set[str] = set()
-        for col_ref in where_clause.find_all(exp.Column):
+    def _emit_predicate_edges(clause: exp.Expression | None, pseudo_col: str, transform_type: str) -> None:
+        if clause is None:
+            return
+        expr_str = clause.sql(dialect="databricks")
+        seen: set[str] = set()
+        for col_ref in clause.find_all(exp.Column):
             col_name = col_ref.name
             if not col_name:
                 continue
@@ -416,14 +416,14 @@ def _parse_select_node(
                 resolved_table = default_table
                 qualified = not multi_source
             src = f"{resolved_table}.{col_name}"
-            if src in seen_filter_src:
+            if src in seen:
                 continue
-            seen_filter_src.add(src)
+            seen.add(src)
             edges.append(LineageEdge(
                 source_col=src,
-                target_col=f"{target_table}.__filter__",
-                transform_type="filter",
-                expression=filter_expr_str,
+                target_col=f"{target_table}.{pseudo_col}",
+                transform_type=transform_type,
+                expression=expr_str,
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
@@ -431,69 +431,10 @@ def _parse_select_node(
                 qualified=qualified,
             ))
 
-    # QUALIFY → __qualify__ edges (window-function row filtering, post-window)
-    qualify_clause = select_node.args.get("qualify")
-    if qualify_clause is not None:
-        qualify_expr_str = qualify_clause.sql(dialect="databricks")
-        seen_qualify_src: set[str] = set()
-        for col_ref in qualify_clause.find_all(exp.Column):
-            col_name = col_ref.name
-            if not col_name:
-                continue
-            table_hint = col_ref.table
-            if table_hint:
-                resolved_table, _certain = _resolve_table_hint(table_hint)
-                qqualified = True
-            else:
-                resolved_table = default_table
-                qqualified = not multi_source
-            src = f"{resolved_table}.{col_name}"
-            if src in seen_qualify_src:
-                continue
-            seen_qualify_src.add(src)
-            edges.append(LineageEdge(
-                source_col=src,
-                target_col=f"{target_table}.__qualify__",
-                transform_type="filter",
-                expression=qualify_expr_str,
-                source_file=source_file,
-                source_cell=source_cell,
-                source_line=source_line,
-                confidence="certain" if qqualified else "approximate",
-                qualified=qqualified,
-            ))
-
-    # HAVING → __having__ edges (post-aggregation row filtering)
-    having_clause = select_node.args.get("having")
-    if having_clause is not None:
-        having_expr_str = having_clause.sql(dialect="databricks")
-        seen_having_src: set[str] = set()
-        for col_ref in having_clause.find_all(exp.Column):
-            col_name = col_ref.name
-            if not col_name:
-                continue
-            table_hint = col_ref.table
-            if table_hint:
-                resolved_table, _certain = _resolve_table_hint(table_hint)
-                hqualified = True
-            else:
-                resolved_table = default_table
-                hqualified = not multi_source
-            src = f"{resolved_table}.{col_name}"
-            if src in seen_having_src:
-                continue
-            seen_having_src.add(src)
-            edges.append(LineageEdge(
-                source_col=src,
-                target_col=f"{target_table}.__having__",
-                transform_type="filter",
-                expression=having_expr_str,
-                source_file=source_file,
-                source_cell=source_cell,
-                source_line=source_line,
-                confidence="certain" if hqualified else "approximate",
-                qualified=hqualified,
-            ))
+    # WHERE/QUALIFY/HAVING → predicate lineage edges
+    _emit_predicate_edges(select_node.args.get("where"), "__filter__", "filter")
+    _emit_predicate_edges(select_node.args.get("qualify"), "__qualify__", "filter")
+    _emit_predicate_edges(select_node.args.get("having"), "__having__", "filter")
 
     # Walk SELECT expressions
     for sel in select_node.selects:
@@ -695,9 +636,7 @@ def _parse_merge(
 
     whens = merge.args.get("whens")
     if whens is None:
-        if subquery_aliases:
-            return _resolve_temp_views(edges, subquery_aliases)
-        return edges
+        return _resolve_temp_views(edges, subquery_aliases)
 
     for when in whens.expressions:
         then = when.args.get("then")
@@ -753,9 +692,27 @@ def _parse_merge(
                             transform_type=transform_type,
                             expr_str=expr_str,
                         ))
-    if subquery_aliases:
-        return _resolve_temp_views(edges, subquery_aliases)
-    return edges
+    return _resolve_temp_views(edges, subquery_aliases)
+
+
+def _wildcard_edge(
+    source_col: str,
+    target_col: str,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> LineageEdge:
+    return LineageEdge(
+        source_col=source_col,
+        target_col=target_col,
+        transform_type="passthrough",
+        expression=None,
+        source_file=source_file,
+        source_cell=source_cell,
+        source_line=source_line,
+        confidence="approximate",
+        qualified=False,
+    )
 
 
 def _parse_copy(
@@ -764,26 +721,11 @@ def _parse_copy(
     source_line: int | None,
     source_cell: int | None,
 ) -> list[LineageEdge]:
-    """Handle COPY INTO target FROM 'path' — emit approximate wildcard edge.
-
-    COPY INTO is a Databricks-specific bulk-load statement. Column-level
-    lineage is not recoverable without schema, so we emit a __file__.* →
-    target.* wildcard edge to keep the target table visible in the graph.
-    """
+    """Handle COPY INTO target FROM 'path' — emit approximate wildcard edge."""
     if not isinstance(copy_stmt.this, exp.Table):
         return []
     target_table = _qualified_table_name(copy_stmt.this)
-    return [LineageEdge(
-        source_col="__file__.*",
-        target_col=f"{target_table}.*",
-        transform_type="passthrough",
-        expression=None,
-        source_file=source_file,
-        source_cell=source_cell,
-        source_line=source_line,
-        confidence="approximate",
-        qualified=False,
-    )]
+    return [_wildcard_edge("__file__.*", f"{target_table}.*", source_file, source_line, source_cell)]
 
 
 def _parse_clone(
@@ -792,12 +734,7 @@ def _parse_clone(
     source_line: int | None,
     source_cell: int | None,
 ) -> list[LineageEdge]:
-    """Handle CREATE TABLE target CLONE source — emit approximate wildcard edge.
-
-    SHALLOW/DEEP CLONE copies all data from source. Column-level lineage is
-    a structural copy, so we emit source.* → target.* to keep both tables
-    visible in the graph.
-    """
+    """Handle CREATE TABLE target CLONE source — emit approximate wildcard edge."""
     clone_node = create_stmt.args.get("clone")
     if not clone_node or not isinstance(create_stmt.this, exp.Table):
         return []
@@ -805,17 +742,7 @@ def _parse_clone(
     if not (isinstance(clone_node, exp.Clone) and isinstance(clone_node.this, exp.Table)):
         return []
     source_table = _qualified_table_name(clone_node.this)
-    return [LineageEdge(
-        source_col=f"{source_table}.*",
-        target_col=f"{target_table}.*",
-        transform_type="passthrough",
-        expression=None,
-        source_file=source_file,
-        source_cell=source_cell,
-        source_line=source_line,
-        confidence="approximate",
-        qualified=False,
-    )]
+    return [_wildcard_edge(f"{source_table}.*", f"{target_table}.*", source_file, source_line, source_cell)]
 
 
 _DEEP_CLONE_RE = re.compile(
@@ -839,17 +766,7 @@ def _parse_command_fallback(
     if m:
         target_table = m.group(1).strip(';')
         source_table = m.group(2).strip(';')
-        return [LineageEdge(
-            source_col=f"{source_table}.*",
-            target_col=f"{target_table}.*",
-            transform_type="passthrough",
-            expression=None,
-            source_file=source_file,
-            source_cell=source_cell,
-            source_line=source_line,
-            confidence="approximate",
-            qualified=False,
-        )]
+        return [_wildcard_edge(f"{source_table}.*", f"{target_table}.*", source_file, source_line, source_cell)]
     return []
 
 
@@ -901,9 +818,7 @@ def _parse_single_statement(
             source_file, source_line, source_cell,
             subquery_aliases=subquery_aliases,
         ))
-    if subquery_aliases:
-        edges = _resolve_temp_views(edges, subquery_aliases)
-    return edges
+    return _resolve_temp_views(edges, subquery_aliases)
 
 
 def _resolve_temp_views(
@@ -1077,7 +992,6 @@ def _normalize_double_quotes(sql: str) -> str:
     SQLGlot issue #6303: the Databricks dialect tokenizes "col" as a string
     literal instead of a quoted identifier. Replacing with `col` restores
     correct column resolution for ANSI-style quoted names.
-    Only matches valid identifier patterns to avoid touching actual strings.
     """
     return _DOUBLE_QUOTED_IDENT_RE.sub(r'`\1`', sql)
 
@@ -1157,8 +1071,6 @@ def parse_sql(
     temp_views: set[str] = set()
     edges: list[LineageEdge] = []
     for statement in statements:
-        if statement is None:
-            continue
         if _is_temp_view(statement) and isinstance(statement.this, exp.Table):
             temp_views.add(_qualified_table_name(statement.this))
         edges.extend(
