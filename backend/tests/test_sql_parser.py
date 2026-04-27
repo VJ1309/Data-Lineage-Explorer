@@ -900,3 +900,231 @@ def test_temp_view_uppercase_wildcard_select_in_databricks_notebook():
     assert not any("upper_stage" in s for s in sources), "UPPER_STAGE must not leak as source"
     # All edges must trace back to the base table
     assert all("uc_dev.raw.source_tbl" in s for s in sources)
+
+
+# ── R3: Missing aggregates ─────────────────────────────────────────────────────
+
+def test_approx_count_distinct_is_aggregation():
+    """APPROX_COUNT_DISTINCT must be classified as aggregation, not expression."""
+    sql = "SELECT APPROX_COUNT_DISTINCT(user_id) AS approx_users FROM events"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.approx_users")
+    assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
+
+
+def test_stddev_is_aggregation():
+    """STDDEV must be classified as aggregation."""
+    sql = "SELECT STDDEV(amount) AS std_amount FROM orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.std_amount")
+    assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
+
+
+def test_variance_is_aggregation():
+    """VARIANCE must be classified as aggregation."""
+    sql = "SELECT VARIANCE(score) AS var_score FROM results"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.var_score")
+    assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
+
+
+def test_percentile_approx_is_aggregation():
+    """PERCENTILE_APPROX must be classified as aggregation."""
+    sql = "SELECT PERCENTILE_APPROX(amount, 0.5) AS median FROM orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    e = next(e for e in edges if e.target_col == "result.median")
+    assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
+
+
+# ── R4: Double-quoted identifier normalization ─────────────────────────────────
+
+def test_double_quoted_column_resolved_as_identifier():
+    """Double-quoted column names must produce correct lineage, not be silently dropped."""
+    sql = 'SELECT "order_id", "amount" FROM raw_orders'
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    assert "raw_orders.order_id" in sources, f"double-quoted column not resolved: {sources}"
+    assert "raw_orders.amount" in sources
+
+
+def test_double_quoted_target_in_insert():
+    """Double-quoted table in INSERT INTO must resolve to correct target."""
+    sql = 'INSERT INTO "my_schema"."my_table" SELECT id FROM source_tbl'
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    targets = {e.target_col for e in edges}
+    assert any("my_table" in t for t in targets), f"quoted target table not resolved: {targets}"
+
+
+# ── R1: QUALIFY filter edges ───────────────────────────────────────────────────
+
+def test_qualify_emits_qualify_filter_edge():
+    """QUALIFY clause must emit __qualify__ edges with transform_type=filter."""
+    sql = """
+    INSERT INTO result
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+    FROM events
+    QUALIFY rn = 1
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    qualify_edges = [e for e in edges if e.target_col == "result.__qualify__"]
+    assert qualify_edges, f"no __qualify__ edges emitted; edges={[(e.source_col, e.target_col) for e in edges]}"
+    for e in qualify_edges:
+        assert e.transform_type == "filter", f"qualify edge must have transform_type=filter; got {e.transform_type!r}"
+
+
+def test_qualify_sources_correct_column():
+    """QUALIFY rn = 1 must emit an edge from the column referenced in the QUALIFY predicate."""
+    sql = """
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY ts) AS rn
+    FROM events
+    QUALIFY rn = 1
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    qualify_sources = {e.source_col for e in edges if e.target_col == "result.__qualify__"}
+    assert any("rn" in s for s in qualify_sources), (
+        f"QUALIFY predicate column 'rn' not in sources: {qualify_sources}"
+    )
+
+
+def test_qualify_without_columns_emits_no_qualify_edge():
+    """QUALIFY 1 = 1 (no column refs) must not emit phantom qualify edges."""
+    sql = "SELECT id FROM t QUALIFY 1 = 1"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert not any(e.target_col == "result.__qualify__" for e in edges)
+
+
+# ── R2: HAVING filter edges ────────────────────────────────────────────────────
+
+def test_having_emits_having_filter_edge():
+    """HAVING clause must emit __having__ edges with transform_type=filter."""
+    sql = """
+    INSERT INTO result
+    SELECT customer_id, SUM(amount) AS total
+    FROM orders
+    GROUP BY customer_id
+    HAVING SUM(amount) > 1000
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    having_edges = [e for e in edges if e.target_col == "result.__having__"]
+    assert having_edges, f"no __having__ edges emitted; edges={[(e.source_col, e.target_col) for e in edges]}"
+    for e in having_edges:
+        assert e.transform_type == "filter", f"having edge must have transform_type=filter; got {e.transform_type!r}"
+    sources = {e.source_col for e in having_edges}
+    assert any("amount" in s for s in sources), f"HAVING SUM(amount) must reference 'amount': {sources}"
+
+
+def test_having_without_columns_emits_no_having_edge():
+    """HAVING 1 = 1 (no column refs) must not emit phantom having edges."""
+    sql = "SELECT id FROM t GROUP BY id HAVING 1 = 1"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert not any(e.target_col == "result.__having__" for e in edges)
+
+
+# ── R5: MERGE USING subquery ───────────────────────────────────────────────────
+
+def test_merge_using_subquery_traces_source_columns():
+    """MERGE INTO t USING (SELECT ...) AS s — source columns from subquery must be traced."""
+    sql = """
+    MERGE INTO target_table t
+    USING (SELECT id, val FROM staging WHERE active = 1) AS s
+    ON t.id = s.id
+    WHEN MATCHED THEN UPDATE SET t.val = s.val
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "target_table.val" in targets, f"MERGE UPDATE target missing; targets={targets}"
+    assert any("staging" in s for s in sources), (
+        f"staging source not traced through USING subquery; sources={sources}"
+    )
+    # The subquery alias 's' must not appear as a phantom source table
+    assert not any(s.startswith("s.") for s in sources), (
+        f"subquery alias 's' leaked as phantom source: {sources}"
+    )
+
+
+def test_merge_using_subquery_with_not_matched_insert():
+    """MERGE USING subquery — NOT MATCHED THEN INSERT must also trace through subquery."""
+    sql = """
+    MERGE INTO target_table t
+    USING (SELECT id, name FROM source_table) AS s
+    ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "target_table.id" in targets
+    assert "target_table.name" in targets
+    assert any("source_table" in s for s in sources), (
+        f"source_table not traced through USING subquery: {sources}"
+    )
+
+
+# ── R6: COPY INTO detect-and-degrade ──────────────────────────────────────────
+
+def test_copy_into_emits_approximate_wildcard_edge():
+    """COPY INTO target FROM 'path' must emit __file__.* → target.* approximate edge."""
+    sql = "COPY INTO my_catalog.my_schema.my_table FROM '/mnt/data/orders/'"
+    edges = parse_sql(sql, source_file="load.sql", source_line=1)
+    assert edges, "COPY INTO must emit at least one edge"
+    e = edges[0]
+    assert e.source_col == "__file__.*", f"expected __file__.*, got {e.source_col!r}"
+    assert "my_table" in e.target_col, f"target must include table name; got {e.target_col!r}"
+    assert e.confidence == "approximate"
+    assert e.transform_type == "passthrough"
+
+
+def test_copy_into_unqualified_table():
+    """COPY INTO without catalog/schema must still emit an edge to the table."""
+    sql = "COPY INTO orders FROM '/mnt/landing/'"
+    edges = parse_sql(sql, source_file="load.sql", source_line=1)
+    assert any("orders" in e.target_col for e in edges), (
+        f"COPY INTO target 'orders' not in edges: {[(e.source_col, e.target_col) for e in edges]}"
+    )
+
+
+# ── R7: CLONE detect-and-degrade ──────────────────────────────────────────────
+
+def test_clone_table_emits_approximate_passthrough_edge():
+    """CREATE TABLE new_tbl CLONE src_tbl must emit src.* → new.* approximate edge."""
+    sql = "CREATE TABLE my_catalog.schema.new_table CLONE my_catalog.schema.source_table"
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    assert edges, "CLONE must emit at least one edge"
+    e = edges[0]
+    assert "source_table" in e.source_col, f"clone source missing; got {e.source_col!r}"
+    assert "new_table" in e.target_col, f"clone target missing; got {e.target_col!r}"
+    assert e.confidence == "approximate"
+    assert e.transform_type == "passthrough"
+
+
+def test_deep_clone_emits_edge():
+    """CREATE TABLE t DEEP CLONE src must also emit a lineage edge."""
+    sql = "CREATE TABLE new_tbl DEEP CLONE src_tbl"
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    assert any("src_tbl" in e.source_col for e in edges), (
+        f"DEEP CLONE source 'src_tbl' not in edges: {[(e.source_col, e.target_col) for e in edges]}"
+    )
+
+
+# ── R8: read_files() / cloud_files() in FROM ──────────────────────────────────
+
+def test_read_files_in_from_emits_synthetic_source():
+    """SELECT from read_files() must register a synthetic source and emit edges."""
+    sql = "SELECT id, name FROM read_files('/mnt/landing/orders/*.parquet', format => 'parquet') AS t"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert edges, "read_files() query must emit edges"
+    sources = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    # The synthetic source must not be empty and must not be the raw function call string
+    assert all(s and "read_files" not in s for s in sources), (
+        f"synthetic source from read_files() looks wrong: {sources}"
+    )
+
+
+def test_cloud_files_in_from_emits_synthetic_source():
+    """SELECT from cloud_files() must register a synthetic source and emit edges."""
+    sql = "INSERT INTO result SELECT id, val FROM cloud_files('/mnt/data/', 'parquet') AS f"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert edges, "cloud_files() query must emit edges"
+    targets = {e.target_col for e in edges}
+    assert any("result" in t for t in targets), f"result table missing in targets: {targets}"
