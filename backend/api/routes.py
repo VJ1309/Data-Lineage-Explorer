@@ -101,7 +101,7 @@ async def register_source(
         MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
         if len(zip_bytes) > MAX_ZIP_BYTES:
             raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
-        entry["_zip_bytes"] = zip_bytes
+        entry["_records"] = ingest_zip(zip_bytes, source_ref=source_id)
         entry["url"] = file.filename or "upload"
 
     elif source_type == "git" and url:
@@ -179,8 +179,7 @@ def refresh_source(source_id: str):
     records = []
 
     if source_type == "upload":
-        zip_bytes = entry.get("_zip_bytes", b"")
-        records = ingest_zip(zip_bytes, source_ref=source_id)
+        records = entry.get("_records", [])
 
     elif source_type == "git":
         from ingestion.git import ingest_git
@@ -212,6 +211,7 @@ def refresh_source(source_id: str):
 
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
+    state.parse_warnings = [w for w in state.parse_warnings if w.get("source_id") != source_id]
     state.parse_warnings.extend(
         {"file": w.file, "error": w.error, "severity": w.severity, "source_id": source_id}
         for w in new_warnings
