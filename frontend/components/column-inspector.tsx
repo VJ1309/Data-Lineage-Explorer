@@ -40,7 +40,7 @@ export function ColumnInspector({
   const incoming = edges.filter((e) => e.target_col === colId);
 
   const withExpression = incoming.filter(
-    (e) => e.expression && e.expression !== "*" && e.transform_type !== "passthrough"
+    (e) => e.expression && e.expression !== "*"
   );
 
   return (
@@ -71,7 +71,7 @@ export function ColumnInspector({
                       {e.source_line != null ? ` · line ${e.source_line}` : ""}
                     </p>
                   )}
-                  <div className="rounded-md overflow-hidden ring-1 ring-border/40">
+                  <div className="rounded-md overflow-hidden ring-1 ring-border/40 max-h-48 overflow-y-auto">
                     <SyntaxHighlighter
                       language={detectLang(e.source_file)}
                       style={vscDarkPlus}
