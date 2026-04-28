@@ -226,7 +226,7 @@ def downstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
     return edges
 
 
-def trace_paths(raw_graph: nx.DiGraph, col_id: str) -> tuple[list[list[dict]], bool]:
+def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 500) -> tuple[list[list[dict]], bool]:
     """DFS backward from col_id, following both named and wildcard edges.
 
     Wildcard edges (tbl.* → other.*) are synthesized into named column edges
@@ -234,7 +234,8 @@ def trace_paths(raw_graph: nx.DiGraph, col_id: str) -> tuple[list[list[dict]], b
     source→temp_view→target chain is reconstructed correctly.
 
     Cycles are prevented by the per-path visited set (with backtracking).
-    No depth limit — the full chain is always returned.
+    Uses mutable backtracking (single shared path list, append/pop) to avoid
+    creating a new list copy at every recursion level.
     """
 
     def step_dict(src: str, tgt: str, edge_data) -> dict:
@@ -276,18 +277,29 @@ def trace_paths(raw_graph: nx.DiGraph, col_id: str) -> tuple[list[list[dict]], b
         return result
 
     all_paths: list[list[dict]] = []
+    truncated = False
+    # Single mutable path — append on enter, pop on exit (no per-level list copies)
+    current_path: list[dict] = []
 
-    def dfs(node: str, steps_so_far: list[dict], visited: set[str]) -> None:
+    def dfs(node: str, visited: set[str]) -> None:
+        nonlocal truncated
+        if truncated:
+            return
         preds = get_preds(node, visited)
         if not preds:
-            if steps_so_far:
-                all_paths.append(list(reversed(steps_so_far)))
+            if current_path:
+                all_paths.append(list(reversed(current_path)))
+                if len(all_paths) >= max_paths:
+                    truncated = True
             return
         for pred, tgt, edge_data in preds:
-            step = step_dict(pred, tgt, edge_data)
+            if truncated:
+                return
+            current_path.append(step_dict(pred, tgt, edge_data))
             visited.add(pred)
-            dfs(pred, steps_so_far + [step], visited)
+            dfs(pred, visited)
+            current_path.pop()
             visited.discard(pred)
 
-    dfs(col_id, [], {col_id})
-    return all_paths, False
+    dfs(col_id, {col_id})
+    return all_paths, truncated

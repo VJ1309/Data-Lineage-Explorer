@@ -424,6 +424,7 @@ export function TransformInspector({
                 <span className="text-muted-foreground/40">
                   {" · "}{paths.length} path{paths.length !== 1 ? "s" : ""}
                   {originCount > 1 && `, ${originCount} sources`}
+                  {truncated && " (showing first 500)"}
                 </span>
               )}
             </p>
@@ -432,6 +433,7 @@ export function TransformInspector({
           <p className="text-xs text-muted-foreground/70 font-mono">
             {paths.length} path{paths.length !== 1 ? "s" : ""}
             {originCount > 1 && `, ${originCount} sources`}
+            {truncated && <span className="text-muted-foreground/40"> · showing first 500</span>}
             {" · "}
             <span className="text-muted-foreground/40">select a path below to inspect</span>
           </p>
