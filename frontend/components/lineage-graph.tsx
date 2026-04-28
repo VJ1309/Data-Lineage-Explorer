@@ -26,6 +26,7 @@ type Props = {
   nodes: { id: string }[];
   edges: LineageEdge[];
   targetColId: string;
+  onColumnClick?: (colId: string) => void;
 };
 
 function splitColId(id: string): [string, string] {
@@ -118,11 +119,20 @@ function toTableLevel(
   };
 }
 
-export function LineageGraph({ nodes, edges, targetColId }: Props) {
+export function LineageGraph({ nodes, edges, targetColId, onColumnClick }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [showJoinKeys, setShowJoinKeys] = useState(false);
   const [targetTable] = splitColId(targetColId);
+
+  const handleNodeClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      if (!onColumnClick || collapsed) return;
+      if (node.id.endsWith(".__filter__") || node.id.endsWith(".__joinkey__")) return;
+      onColumnClick(node.id);
+    },
+    [onColumnClick, collapsed],
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -247,7 +257,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
               </div>
             ),
           },
-          style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "6px 10px", width: 180, textAlign: "center" as const },
+          style: { background: bg, color, border, borderRadius: 6, fontSize: 11, padding: "6px 10px", width: 180, textAlign: "center" as const, cursor: onColumnClick ? "pointer" : "default" },
         };
       });
     }
@@ -452,6 +462,7 @@ export function LineageGraph({ nodes, edges, targetColId }: Props) {
             fitViewOptions={{ padding: 0.2 }}
             minZoom={0.3}
             maxZoom={2}
+            onNodeClick={handleNodeClick}
           >
             <Background color="#1a2233" />
             <Controls />

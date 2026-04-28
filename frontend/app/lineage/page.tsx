@@ -1,21 +1,34 @@
 "use client";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useState, useEffect } from "react";
 import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useLineage, usePaths } from "@/lib/hooks";
+import { useLineage } from "@/lib/hooks";
 import { LineageGraph } from "@/components/lineage-graph";
 import { LineageTree } from "@/components/lineage-tree";
-import { TransformInspector } from "@/components/transform-inspector";
+import { ColumnInspector } from "@/components/column-inspector";
 import { GitBranch } from "lucide-react";
 
 function LineageContent() {
   const params = useSearchParams();
   const table = params.get("table");
   const column = params.get("column");
-  const [transformActivated, setTransformActivated] = useState(false);
+
+  const [selectedColId, setSelectedColId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("graph");
+
   const { data, isLoading, error } = useLineage(table, column);
-  const { data: pathsData, isLoading: pathsLoading, error: pathsError } = usePaths(table, column, transformActivated);
+
+  // Reset inspector when the viewed column changes
+  useEffect(() => {
+    setSelectedColId(null);
+    setActiveTab("graph");
+  }, [table, column]);
+
+  function handleColumnClick(colId: string) {
+    setSelectedColId(colId);
+    setActiveTab("transform");
+  }
 
   if (!table || !column) {
     return (
@@ -69,7 +82,7 @@ function LineageContent() {
         </div>
       </div>
 
-      <Tabs defaultValue="graph" onValueChange={(v) => { if (v === "transform") setTransformActivated(true); }}>
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="graph">⬡ Graph</TabsTrigger>
           <TabsTrigger value="tree">≡ Tree</TabsTrigger>
@@ -81,6 +94,7 @@ function LineageContent() {
             nodes={data.graph.nodes}
             edges={data.graph.edges}
             targetColId={data.target}
+            onColumnClick={handleColumnClick}
           />
         </TabsContent>
 
@@ -89,14 +103,7 @@ function LineageContent() {
         </TabsContent>
 
         <TabsContent value="transform" className="pt-4">
-          <TransformInspector
-            key={`${table}.${column}`}
-            paths={pathsData?.paths ?? []}
-            truncated={pathsData?.truncated ?? false}
-            isLoading={pathsLoading}
-            isError={!!pathsError}
-            errorMessage={(pathsError as Error)?.message}
-          />
+          <ColumnInspector colId={selectedColId} edges={data.graph.edges} />
         </TabsContent>
       </Tabs>
     </div>
