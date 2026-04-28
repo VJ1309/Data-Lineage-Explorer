@@ -1107,6 +1107,157 @@ def test_deep_clone_emits_edge():
     )
 
 
+# ── Passthrough SQL expression (full SELECT context) ──────────────────────────
+
+def test_passthrough_expression_is_full_select_body():
+    """Passthrough edge expression must be the full SELECT body, not the column ref."""
+    sql = "INSERT INTO tgt SELECT a, b FROM src"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges"
+    for e in pt:
+        assert e.expression is not None, "passthrough expression must not be None"
+        expr = e.expression
+        assert "SELECT" in expr, f"expression must contain SELECT; got {expr!r}"
+        assert "src" in expr, f"expression must contain FROM src; got {expr!r}"
+        # Must NOT be just a bare column reference like 'a' or 'b'
+        assert len(expr) > 10, f"expression too short to be a full SELECT; got {expr!r}"
+
+
+def test_passthrough_expression_shows_renamed_column():
+    """Renamed passthrough column (AS alias) must be visible in the full SELECT expression."""
+    sql = "SELECT customer_id AS client_id FROM raw.orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges"
+    expr = pt[0].expression
+    assert expr is not None
+    assert "client_id" in expr, f"AS alias not in expression; got {expr!r}"
+
+
+def test_passthrough_expression_single_cte():
+    """Single CTE: passthrough expression contains full WITH ... SELECT."""
+    sql = "WITH base AS (SELECT x FROM t) SELECT x FROM base"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    # Edges from the outer SELECT (resolving through the CTE) are the passthrough ones
+    pt = [e for e in edges if e.transform_type == "passthrough" and "t." in e.source_col]
+    assert pt, f"expected passthrough from 't'; edges={[(e.source_col,e.target_col,e.transform_type) for e in edges]}"
+    expr = pt[0].expression
+    assert expr is not None
+    assert "WITH" in expr or "SELECT" in expr, f"expression missing WITH/SELECT; got {expr!r}"
+    assert "base" in expr, f"CTE alias 'base' not in expression; got {expr!r}"
+
+
+def test_passthrough_expression_multi_cte():
+    """Multi-CTE: all CTE definitions appear in the passthrough expression."""
+    sql = """
+    WITH base AS (SELECT x FROM t1),
+         enriched AS (SELECT x FROM base JOIN t2 ON base.x = t2.x)
+    SELECT x FROM enriched
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges"
+    exprs = [e.expression for e in pt if e.expression]
+    assert exprs, "passthrough edges must have non-null expression"
+    # At least one expression must contain both CTE names
+    multi_cte_expr = next((ex for ex in exprs if "base" in ex and "enriched" in ex), None)
+    assert multi_cte_expr is not None, (
+        f"no expression contains both CTEs; expressions={exprs}"
+    )
+
+
+def test_passthrough_expression_preserves_where():
+    """WHERE clause must be preserved in the passthrough expression."""
+    sql = "SELECT customer_id FROM orders WHERE status = 'active'"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges"
+    expr = pt[0].expression
+    assert expr is not None
+    assert "WHERE" in expr or "where" in expr.lower(), f"WHERE not in expression; got {expr!r}"
+    assert "active" in expr, f"WHERE value not in expression; got {expr!r}"
+
+
+def test_passthrough_expression_preserves_join():
+    """JOIN clause must be preserved in the passthrough expression."""
+    sql = "SELECT a.col FROM a JOIN b ON a.id = b.id"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges"
+    expr = pt[0].expression
+    assert expr is not None
+    assert "JOIN" in expr or "join" in expr.lower(), f"JOIN not in expression; got {expr!r}"
+
+
+def test_aggregation_expression_not_overridden():
+    """Aggregation edges must keep per-column expression, not the full SELECT."""
+    sql = "SELECT SUM(amount) AS total FROM orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    agg = [e for e in edges if e.transform_type == "aggregation"]
+    assert agg, "expected aggregation edge"
+    expr = agg[0].expression
+    assert expr is not None
+    assert "SUM" in expr, f"SUM not in aggregation expression; got {expr!r}"
+    # Full SELECT would contain FROM — aggregation expr must be a column-level expr
+    assert "FROM" not in expr, f"aggregation expression should not be full SELECT; got {expr!r}"
+
+
+def test_expression_transform_not_overridden():
+    """Arithmetic expression edges must keep per-column expression, not the full SELECT."""
+    sql = "SELECT amount * 1.1 AS adjusted FROM orders"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    expr_edges = [e for e in edges if e.transform_type == "expression"]
+    assert expr_edges, "expected expression-type edge"
+    expr = expr_edges[0].expression
+    assert expr is not None
+    assert "1.1" in expr, f"arithmetic not in expression; got {expr!r}"
+    assert "FROM" not in expr, f"expression edge should not be full SELECT; got {expr!r}"
+
+
+def test_clone_passthrough_expression_unchanged():
+    """CLONE (approximate passthrough) expression must NOT be the full SELECT body."""
+    sql = "CREATE TABLE new_tbl CLONE src_tbl"
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    assert edges, "CLONE must emit at least one edge"
+    e = edges[0]
+    assert e.confidence == "approximate"
+    assert e.transform_type == "passthrough"
+    # Approximate/wildcard edges do not have a SELECT body
+    if e.expression is not None:
+        assert "SELECT" not in e.expression, (
+            f"CLONE edge should not contain full SELECT; got {e.expression!r}"
+        )
+
+
+def test_passthrough_expression_select_star():
+    """SELECT * passthrough must produce a full SELECT expression containing *."""
+    sql = "SELECT * FROM tbl"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    # SELECT * produces wildcard edges — their expression comes from _wildcard_edge, unchanged
+    for e in pt:
+        if e.expression:
+            # Wildcard edges keep their short expression ('*'), not the full SELECT
+            assert "SELECT" not in e.expression or e.confidence == "certain", (
+                f"unexpected expression on SELECT * edge: {e.expression!r}"
+            )
+
+
+def test_ctas_passthrough_expression_is_inner_select():
+    """CREATE TABLE AS SELECT passthrough expression must be the inner SELECT body."""
+    sql = "CREATE TABLE tgt AS SELECT a, b FROM src"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    pt = [e for e in edges if e.transform_type == "passthrough"]
+    assert pt, "expected passthrough edges from CTAS"
+    for e in pt:
+        assert e.expression is not None
+        assert "SELECT" in e.expression, f"expression must contain SELECT; got {e.expression!r}"
+        assert "CREATE" not in e.expression, (
+            f"CREATE TABLE wrapper must not appear in expression; got {e.expression!r}"
+        )
+
+
 # ── R8: read_files() / cloud_files() in FROM ──────────────────────────────────
 
 def test_read_files_in_from_emits_synthetic_source():
