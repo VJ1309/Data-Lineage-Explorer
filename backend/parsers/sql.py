@@ -852,6 +852,13 @@ def _resolve_temp_views(
     # SQLGlot normalization; SELECT statements may reference columns in UPPERCASE).
     temp_views_lower = {v.lower() for v in temp_views}
 
+    # Pre-resolution snapshot: target_col.lower() -> edges that produce it.
+    # Used by _best_expression to walk backward through the chain collecting expressions.
+    # Built before the chain-resolution loop so keys reflect the original edge structure.
+    edge_lookup: dict[str, list[LineageEdge]] = {}
+    for e in edges:
+        edge_lookup.setdefault(e.target_col.lower(), []).append(e)
+
     # Build full map of temp_view.col -> upstream sources (all keys lowercased)
     tv_sources: dict[str, list[str]] = {}
     for e in edges:
@@ -894,7 +901,52 @@ def _resolve_temp_views(
         return [
             (s[:-1] + col_name if s.endswith(".*") else s)
             for s in wildcard_sources
+            if s.endswith(".*") or s.rsplit(".", 1)[-1].lower() == col_name.lower()
         ]
+
+    # Priority order mirrors _classify_transform: lower number = higher priority.
+    _PRIORITY: dict[str, int] = {"window": 0, "cast": 1, "aggregation": 2, "expression": 3, "passthrough": 4}
+
+    def _best_expression(
+        start: str,
+        fallback: tuple[str, str | None],
+    ) -> tuple[str, str | None]:
+        """Walk edge_lookup backward from start, return highest-priority (transform_type, expression).
+
+        Only enters the walk when start is a temp-view column. For each hop,
+        checks edge_lookup[current] (exact) then edge_lookup[tbl.*] (wildcard base).
+        Among ties in priority, prefers the deepest candidate (closest to original source).
+        Falls back to the consumer edge's expression when nothing in the chain beats it.
+        """
+        start_lower = start.lower()
+        tbl0 = start_lower.rsplit(".", 1)[0] if "." in start_lower else ""
+        if tbl0 not in temp_views_lower:
+            return fallback
+        candidates: list[tuple[str, str | None]] = []
+        current = start_lower
+        visited: set[str] = set()
+        while True:
+            tbl = current.rsplit(".", 1)[0] if "." in current else ""
+            if tbl not in temp_views_lower or current in visited:
+                break
+            visited.add(current)
+            here = edge_lookup.get(current) or edge_lookup.get(f"{tbl}.*") or []
+            for edge_e in here:
+                candidates.append((edge_e.transform_type, edge_e.expression))
+            if here:
+                current = here[0].source_col.lower()
+            else:
+                break
+        if not candidates:
+            return fallback
+        fallback_prio = _PRIORITY.get(fallback[0], 4)
+        chain_best_prio = min(_PRIORITY.get(tt, 4) for tt, _ in candidates)
+        if chain_best_prio >= fallback_prio:
+            return fallback
+        for tt, expr in reversed(candidates):
+            if _PRIORITY.get(tt, 4) == chain_best_prio:
+                return (tt, expr)
+        return fallback
 
     # Resolve chains iteratively until stable
     max_iterations = len(temp_views_lower) + 1
@@ -937,6 +989,7 @@ def _resolve_temp_views(
                     if tv_key_tbl == src_tbl.lower() and not tv_key.endswith(".*"):
                         col_name = tv_key.rsplit(".", 1)[-1]
                         tgt_col = f"{tgt_base}.{col_name}"
+                        best_tt, best_expr = _best_expression(tv_key, (e.transform_type, e.expression))
                         for upcol in tv_vals:
                             key = (upcol, tgt_col)
                             if key not in seen_per_col:
@@ -944,8 +997,8 @@ def _resolve_temp_views(
                                 resolved.append(LineageEdge(
                                     source_col=upcol,
                                     target_col=tgt_col,
-                                    transform_type=e.transform_type,
-                                    expression=e.expression,
+                                    transform_type=best_tt,
+                                    expression=best_expr,
                                     source_file=e.source_file,
                                     source_cell=e.source_cell,
                                     source_line=e.source_line,
@@ -955,14 +1008,15 @@ def _resolve_temp_views(
             upstream_cols = _lookup(e.source_col)
             if upstream_cols:
                 seen_up: set[str] = set()
+                best_tt, best_expr = _best_expression(e.source_col, (e.transform_type, e.expression))
                 for upstream_col in upstream_cols:
                     if upstream_col not in seen_up:
                         seen_up.add(upstream_col)
                         resolved.append(LineageEdge(
                             source_col=upstream_col,
                             target_col=e.target_col,
-                            transform_type=e.transform_type,
-                            expression=e.expression,
+                            transform_type=best_tt,
+                            expression=best_expr,
                             source_file=e.source_file,
                             source_cell=e.source_cell,
                             source_line=e.source_line,
