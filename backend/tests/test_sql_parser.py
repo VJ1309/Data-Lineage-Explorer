@@ -683,6 +683,143 @@ def test_where_clause_without_columns_emits_no_filter_edge():
     assert not any(e.target_col == "result.__filter__" for e in edges)
 
 
+def test_lookup_wildcard_no_cross_column_edges():
+    """Named-column lookup through a wildcard chain must not return cross-column sources.
+
+    Chain: base_table.(col_a, col_b) -> intermediate_v.(col_a, col_b) [named]
+           intermediate_v.* -> wrapper_v.*  [SELECT *]
+           wrapper_v.col_a -> final.col_a   [INSERT SELECT col_a]
+
+    After chain-expansion tv_sources["wrapper_v.*"] = ["base_table.col_a", "base_table.col_b"].
+    _lookup("wrapper_v.col_a") must return only ["base_table.col_a"], not both.
+    """
+    sql = """
+    CREATE OR REPLACE TEMP VIEW intermediate_v AS
+    SELECT col_a, col_b FROM base_table;
+
+    CREATE OR REPLACE TEMP VIEW wrapper_v AS
+    SELECT * FROM intermediate_v;
+
+    INSERT INTO final_table SELECT col_a, col_b FROM wrapper_v
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+
+    col_a_sources = {e.source_col for e in edges if e.target_col == "final_table.col_a"}
+    col_b_sources = {e.source_col for e in edges if e.target_col == "final_table.col_b"}
+
+    assert "base_table.col_a" in col_a_sources, f"col_a must trace to base_table.col_a; got {col_a_sources}"
+    assert "base_table.col_b" not in col_a_sources, (
+        f"cross-column edge: base_table.col_b must NOT appear as source of final_table.col_a; got {col_a_sources}"
+    )
+    assert "base_table.col_b" in col_b_sources, f"col_b must trace to base_table.col_b; got {col_b_sources}"
+    assert "base_table.col_a" not in col_b_sources, (
+        f"cross-column edge: base_table.col_a must NOT appear as source of final_table.col_b; got {col_b_sources}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# U2: Expression inheritance through temp-view chains
+# ---------------------------------------------------------------------------
+
+def test_expression_inherited_through_passthrough_view():
+    """COALESCE in an intermediate temp view must survive resolution to final target.
+
+    Chain: base_table -> tv1 [COALESCE expression] -> final_table [SELECT * passthrough]
+    Resolved edge base_table.col -> final_table.col should carry transform_type='expression'
+    with the COALESCE string, not 'passthrough'/'SELECT * FROM tv1'.
+    """
+    sql = """
+    CREATE OR REPLACE TEMP VIEW tv1 AS
+    SELECT COALESCE(col_a, col_b) AS col_a FROM base_table;
+
+    INSERT INTO final_table SELECT col_a FROM tv1
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    resolved = [e for e in edges if e.target_col == "final_table.col_a"]
+    assert resolved, f"no edge for final_table.col_a; all edges: {[(e.source_col, e.target_col) for e in edges]}"
+    best = resolved[0]
+    assert best.transform_type == "expression", (
+        f"COALESCE must survive chain resolution; got transform_type={best.transform_type!r}"
+    )
+    assert best.expression and "COALESCE" in best.expression.upper(), (
+        f"expression must contain COALESCE; got {best.expression!r}"
+    )
+
+
+def test_all_passthrough_chain_preserves_consumer_expression():
+    """All-passthrough chain: resolved edge carries consumer expression unchanged."""
+    sql = """
+    CREATE OR REPLACE TEMP VIEW tv1 AS
+    SELECT col_a FROM base_table;
+
+    INSERT INTO final_table SELECT col_a FROM tv1
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    resolved = [e for e in edges if e.target_col == "final_table.col_a"]
+    assert resolved
+    assert resolved[0].transform_type == "passthrough", (
+        f"all-passthrough chain must stay passthrough; got {resolved[0].transform_type!r}"
+    )
+
+
+def test_aggregation_inherited_through_passthrough_view():
+    """SUM aggregation in intermediate view beats consumer passthrough."""
+    sql = """
+    CREATE OR REPLACE TEMP VIEW agg_v AS
+    SELECT customer_id, SUM(amount) AS total FROM base_table GROUP BY customer_id;
+
+    INSERT INTO final_table SELECT customer_id, total FROM agg_v
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    total_edges = [e for e in edges if e.target_col == "final_table.total"]
+    assert total_edges, f"no edge for final_table.total; edges={[(e.source_col, e.target_col) for e in edges]}"
+    assert total_edges[0].transform_type == "aggregation", (
+        f"SUM must survive chain resolution; got {total_edges[0].transform_type!r}"
+    )
+
+
+def test_window_beats_aggregation_in_chain():
+    """Window function in intermediate hop beats aggregation in consumer hop."""
+    sql = """
+    CREATE OR REPLACE TEMP VIEW window_v AS
+    SELECT col_a, ROW_NUMBER() OVER (PARTITION BY col_a ORDER BY col_b) AS rn
+    FROM base_table;
+
+    INSERT INTO final_table SELECT rn FROM window_v
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    rn_edges = [e for e in edges if e.target_col == "final_table.rn"]
+    assert rn_edges, f"no edge for final_table.rn; edges={[(e.source_col, e.target_col) for e in edges]}"
+    assert rn_edges[0].transform_type == "window", (
+        f"window must survive chain resolution; got {rn_edges[0].transform_type!r}"
+    )
+
+
+def test_consumer_expression_beats_passthrough_intermediate():
+    """Consumer has expression transform, intermediate is passthrough — consumer wins."""
+    sql = """
+    CREATE OR REPLACE TEMP VIEW tv1 AS
+    SELECT col_a FROM base_table;
+
+    INSERT INTO final_table SELECT COALESCE(col_a, 0) AS col_a FROM tv1
+    """
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    resolved = [e for e in edges if e.target_col == "final_table.col_a"]
+    assert resolved
+    assert resolved[0].transform_type == "expression", (
+        f"consumer COALESCE must win over intermediate passthrough; got {resolved[0].transform_type!r}"
+    )
+
+
+def test_non_tempview_edge_expression_unchanged():
+    """Edges where source_col is a real base table are emitted with their original expression."""
+    sql = "INSERT INTO final_table SELECT COALESCE(col_a, 0) AS col_a FROM base_table"
+    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    assert len(edges) == 1
+    assert edges[0].transform_type == "expression"
+    assert edges[0].expression and "COALESCE" in edges[0].expression.upper()
+
+
 def test_join_on_emits_joinkey_edges():
     """JOIN t ON t.id = s.id must emit joinkey edges from both sides to target.__joinkey__."""
     sql = """
