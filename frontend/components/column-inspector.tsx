@@ -10,6 +10,21 @@ function detectLang(file: string | null): string {
   return file.endsWith(".sql") ? "sql" : "python";
 }
 
+const TRANSFORM_PRIORITY: Record<string, number> = {
+  window: 5, cast: 4, aggregation: 3, expression: 2, passthrough: 1,
+};
+
+function bestPredecessor(sourceCol: string, allEdges: LineageEdge[]): LineageEdge | undefined {
+  const preds = allEdges.filter((e) => e.target_col === sourceCol);
+  if (!preds.length) return undefined;
+  return preds.reduce((best, e) =>
+    (TRANSFORM_PRIORITY[e.transform_type ?? "passthrough"] ?? 0) >
+    (TRANSFORM_PRIORITY[best.transform_type ?? "passthrough"] ?? 0)
+      ? e
+      : best
+  );
+}
+
 export function ColumnInspector({
   colId,
   edges,
@@ -39,9 +54,15 @@ export function ColumnInspector({
 
   const incoming = edges.filter((e) => e.target_col === colId);
 
-  const withExpression = incoming.filter(
-    (e) => e.expression && e.expression !== "*"
-  );
+  const seen = new Set<string>();
+  const withExpression = incoming
+    .filter((e) => e.expression && e.expression !== "*")
+    .filter((e) => {
+      const key = `${e.expression}|${e.source_file ?? ""}|${e.source_line ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -100,8 +121,16 @@ export function ColumnInspector({
                 const srcCol = srcDot === -1 ? e.source_col : e.source_col.slice(srcDot + 1);
                 const srcTbl = srcDot === -1 ? "" : e.source_col.slice(0, srcDot);
                 const srcTblShort = srcTbl.split(".").at(-1) || srcTbl;
+
+                // For intermediate source columns, show how they were produced (one hop back).
+                // For base-table sources, fall back to the direct incoming edge.
+                const pred = bestPredecessor(e.source_col, edges);
+                const displayEdge = pred ?? e;
+                const displayType = displayEdge.transform_type ?? "passthrough";
                 const logic =
-                  e.expression && e.expression !== "*" ? e.expression : null;
+                  displayEdge.expression && displayEdge.expression !== "*"
+                    ? displayEdge.expression
+                    : null;
 
                 return (
                   <div
@@ -117,7 +146,7 @@ export function ColumnInspector({
                       <span className="text-muted-foreground/50">{srcTblShort}.</span>
                       {srcCol}
                     </span>
-                    <TransformBadge type={e.transform_type ?? "passthrough"} />
+                    <TransformBadge type={displayType} />
                     <span
                       className="font-mono text-foreground/70 truncate"
                       title={logic ?? "passthrough"}
