@@ -2,7 +2,6 @@
 from __future__ import annotations
 import uuid
 import networkx as nx
-import git
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from lineage.engine import build_graph_with_warnings
 from lineage.engine import upstream as engine_upstream
@@ -71,45 +70,17 @@ async def register_source(
         "warning_count": 0,
     }
 
-    VALID_SOURCE_TYPES = {"upload", "git", "databricks"}
-    if source_type not in VALID_SOURCE_TYPES:
-        raise HTTPException(status_code=400, detail=f"source_type must be one of: {sorted(VALID_SOURCE_TYPES)}")
+    if source_type != "upload":
+        raise HTTPException(status_code=400, detail="source_type must be 'upload'")
 
-    if source_type == "upload":
-        if file is None:
-            raise HTTPException(status_code=400, detail="file is required for upload source")
-        zip_bytes = await file.read()
-        MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
-        if len(zip_bytes) > MAX_ZIP_BYTES:
-            raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
-        entry["_zip_bytes"] = zip_bytes
-        entry["url"] = file.filename or "upload"
-
-    elif source_type == "git" and url:
-        # Lightweight auth check: ls-remote avoids a full clone
-        if token:
-            auth_url = url.replace("https://", f"https://{token}@", 1) if url.startswith("https://") else url
-        else:
-            auth_url = url
-        try:
-            git.cmd.Git().ls_remote(auth_url)
-        except git.GitCommandError as exc:
-            # Sanitize: never echo back the token-embedded URL
-            raise HTTPException(
-                status_code=400,
-                detail=f"Git authentication failed: {exc.stderr.strip() if exc.stderr else str(exc)}",
-            )
-
-    elif source_type == "databricks" and url:
-        from databricks.sdk import WorkspaceClient
-        try:
-            client = WorkspaceClient(host=url, token=token)
-            list(client.workspace.list(path="/"))
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Databricks authentication failed: invalid host or token",
-            )
+    if file is None:
+        raise HTTPException(status_code=400, detail="file is required for upload source")
+    zip_bytes = await file.read()
+    MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
+    if len(zip_bytes) > MAX_ZIP_BYTES:
+        raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
+    entry["_zip_bytes"] = zip_bytes
+    entry["url"] = file.filename or "upload"
 
     state.source_registry[source_id] = entry
     return {k: v for k, v in entry.items() if not k.startswith("_")}
@@ -172,34 +143,8 @@ def refresh_source(source_id: str):
         raise HTTPException(status_code=404, detail="Source not found")
 
     entry = state.source_registry[source_id]
-    source_type = entry["source_type"]
-    records = []
-
-    if source_type == "upload":
-        zip_bytes = entry.get("_zip_bytes", b"")
-        records = ingest_zip(zip_bytes, source_ref=source_id)
-
-    elif source_type == "git":
-        from ingestion.git import ingest_git
-        try:
-            records = ingest_git(
-                url=entry["url"],
-                token=entry.get("_token") or None,
-                source_ref=source_id,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-    elif source_type == "databricks":
-        from ingestion.databricks import ingest_databricks
-        try:
-            records = ingest_databricks(
-                host=entry["url"],
-                token=entry.get("_token", ""),
-                source_ref=source_id,
-            )
-        except Exception:
-            raise HTTPException(status_code=400, detail="Databricks ingestion failed: check host and token")
+    zip_bytes = entry.get("_zip_bytes", b"")
+    records = ingest_zip(zip_bytes, source_ref=source_id)
 
     new_graph, new_warnings = build_graph_with_warnings(records)
     new_raw_graph: nx.DiGraph = new_graph.graph.pop("_raw_graph", nx.DiGraph())

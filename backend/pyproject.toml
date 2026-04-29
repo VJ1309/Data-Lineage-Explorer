@@ -12,8 +12,6 @@ dependencies = [
     "sqlglot>=25.0.0",
     "networkx>=3.3",
     "nbformat>=5.10.0",
-    "gitpython>=3.1.43",
-    "databricks-sdk>=0.28.0",
     "python-multipart>=0.0.9",
 ]
 
