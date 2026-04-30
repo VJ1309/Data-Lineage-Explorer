@@ -1,9 +1,9 @@
 """Module-level in-memory state. All state is lost on server restart."""
-from typing import Any
 import networkx as nx
+from api.models import SourceEntry
 
-# source_registry maps source_id -> SourceConfig dict
-source_registry: dict[str, dict[str, Any]] = {}
+# source_registry maps source_id -> SourceEntry
+source_registry: dict[str, SourceEntry] = {}
 
 # Merged lineage DAG across all registered sources
 lineage_graph: nx.DiGraph = nx.DiGraph()

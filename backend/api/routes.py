@@ -10,6 +10,7 @@ from lineage.engine import trace_paths as engine_trace_paths
 from lineage.ids import split_column_id
 from lineage.models import ParseWarning
 from ingestion.upload import ingest_zip
+from api.models import SourceEntry
 import state
 
 router = APIRouter()
@@ -66,10 +67,7 @@ def _graph_to_payload(graph: nx.DiGraph, col_id: str) -> dict:
 
 @router.get("/sources")
 def list_sources():
-    return [
-        {k: v for k, v in entry.items() if not k.startswith("_")}
-        for entry in state.source_registry.values()
-    ]
+    return [entry.to_public_dict() for entry in state.source_registry.values()]
 
 
 @router.post("/sources")
@@ -80,15 +78,7 @@ async def register_source(
     file: UploadFile | None = File(default=None),
 ):
     source_id = str(uuid.uuid4())[:8]
-    entry: dict = {
-        "id": source_id,
-        "source_type": source_type,
-        "url": url,
-        "_token": token,  # stored with _ prefix so it is filtered from public responses
-        "status": "registered",
-        "file_count": 0,
-        "warning_count": 0,
-    }
+    entry = SourceEntry(id=source_id, source_type=source_type, url=url, token=token)
 
     if source_type != "upload":
         raise HTTPException(status_code=400, detail="source_type must be 'upload'")
@@ -99,11 +89,11 @@ async def register_source(
     MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
     if len(zip_bytes) > MAX_ZIP_BYTES:
         raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
-    entry["_records"] = ingest_zip(zip_bytes, source_ref=source_id)
-    entry["url"] = file.filename or "upload"
+    entry.records = ingest_zip(zip_bytes, source_ref=source_id)
+    entry.url = file.filename or "upload"
 
     state.source_registry[source_id] = entry
-    return {k: v for k, v in entry.items() if not k.startswith("_")}
+    return entry.to_public_dict()
 
 
 @router.delete("/sources/{source_id}")
@@ -112,7 +102,7 @@ def delete_source(source_id: str):
         raise HTTPException(status_code=404, detail="Source not found")
     entry = state.source_registry.get(source_id)
     if entry:
-        _remove_source_files(entry.get("_parsed_files", set()))
+        _remove_source_files(entry.parsed_files)
     del state.source_registry[source_id]
     return {"ok": True}
 
@@ -122,8 +112,8 @@ def list_source_files(source_id: str):
     if source_id not in state.source_registry:
         raise HTTPException(status_code=404, detail="Source not found")
     entry = state.source_registry[source_id]
-    file_stats: dict = entry.get("_file_stats", {})
-    error_files: set = entry.get("_error_files", set())
+    file_stats = entry.file_stats
+    error_files = entry.error_files
 
     result = []
     for fname, stats in sorted(file_stats.items()):
@@ -147,13 +137,13 @@ def refresh_source(source_id: str):
         raise HTTPException(status_code=404, detail="Source not found")
 
     entry = state.source_registry[source_id]
-    records = entry.get("_records", [])
+    records = entry.records
 
     new_graph, new_warnings = build_graph_with_warnings(records)
     new_raw_graph: nx.DiGraph = new_graph.graph.pop("_raw_graph", nx.DiGraph())
 
     # Remove old contributions from this source before adding new ones
-    _remove_source_files(entry.get("_parsed_files", set()))
+    _remove_source_files(entry.parsed_files)
 
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
@@ -183,13 +173,13 @@ def refresh_source(source_id: str):
             if w.severity == "error":
                 error_files.add(w.file)
 
-    entry["_parsed_files"] = set(file_stats.keys())
-    entry["_file_stats"] = file_stats
-    entry["_error_files"] = error_files
+    entry.parsed_files = set(file_stats.keys())
+    entry.file_stats = file_stats
+    entry.error_files = error_files
 
-    entry["status"] = "parsed"
-    entry["file_count"] = len(records)
-    entry["warning_count"] = len(new_warnings)
+    entry.status = "parsed"
+    entry.file_count = len(records)
+    entry.warning_count = len(new_warnings)
 
     return {"ok": True, "file_count": len(records), "edge_count": new_graph.number_of_edges()}
 
