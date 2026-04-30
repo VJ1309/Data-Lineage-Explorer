@@ -1,6 +1,7 @@
 """Lineage engine: builds and queries a NetworkX DAG from FileRecords."""
 from __future__ import annotations
 import networkx as nx
+from lineage.ids import split_column_id
 from lineage.models import FileRecord, LineageEdge, ParseWarning
 from parsers.sql import parse_sql
 from parsers.pyspark import parse_pyspark
@@ -61,9 +62,9 @@ def _normalize_edges(
         src = e.source_col.lower()
         tgt = e.target_col.lower()
         if "." in src:
-            table_names.add(src.rsplit(".", 1)[0])
+            table_names.add(split_column_id(src)[0])
         if "." in tgt:
-            table_names.add(tgt.rsplit(".", 1)[0])
+            table_names.add(split_column_id(tgt)[0])
 
     # Step 2: Build a mapping from short names to their longest matching form.
     # Only merge when there is exactly one candidate; otherwise record as ambiguous.
@@ -104,7 +105,7 @@ def _normalize_edges(
         col_lower = col_id.lower()
         if "." not in col_lower:
             return col_lower
-        table, col = col_lower.rsplit(".", 1)
+        table, col = split_column_id(col_lower)
         resolved = short_to_long.get(table, table)
         return f"{resolved}.{col}"
 
@@ -264,7 +265,7 @@ def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 500) -> tup
                     result.append((pred, node, raw_graph.edges[pred, node].get("data")))
         # Wildcard expansion: if tbl.col, check tbl.* predecessors
         if "." in node:
-            tbl, col = node.rsplit(".", 1)
+            tbl, col = split_column_id(node)
             wc = f"{tbl}.*"
             if wc in raw_graph and wc not in visited:
                 for pred_wc in raw_graph.predecessors(wc):

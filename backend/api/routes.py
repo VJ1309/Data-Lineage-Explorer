@@ -7,6 +7,7 @@ from lineage.engine import build_graph_with_warnings
 from lineage.engine import upstream as engine_upstream
 from lineage.engine import downstream as engine_downstream
 from lineage.engine import trace_paths as engine_trace_paths
+from lineage.ids import split_column_id
 from lineage.models import ParseWarning
 from ingestion.upload import ingest_zip
 import state
@@ -200,7 +201,7 @@ def list_tables():
     tables: dict[str, int] = {}
     for node in state.lineage_graph.nodes():
         if "." in node:
-            table, _ = node.rsplit(".", 1)
+            table, _ = split_column_id(node)
             tables[table] = tables.get(table, 0) + 1
 
     # Classify each table's role based on edge directions
@@ -208,9 +209,9 @@ def list_tables():
     source_tables: set[str] = set()  # tables read from (appear as edge source)
     for u, v, data in state.lineage_graph.edges(data=True):
         if "." in u:
-            source_tables.add(u.rsplit(".", 1)[0])
+            source_tables.add(split_column_id(u)[0])
         if "." in v:
-            target_tables.add(v.rsplit(".", 1)[0])
+            target_tables.add(split_column_id(v)[0])
 
     result = []
     for t, c in sorted(tables.items()):
@@ -233,7 +234,7 @@ def list_columns(table: str):
     cols = []
     for node in state.lineage_graph.nodes():
         if "." in node:
-            t, col = node.rsplit(".", 1)
+            t, col = split_column_id(node)
             if t == table:
                 preds = list(state.lineage_graph.predecessors(node))
                 edge_data = None
@@ -244,7 +245,7 @@ def list_columns(table: str):
                     # Collect all distinct source tables and expressions for this column
                     for pred in preds:
                         if "." in pred:
-                            st = pred.rsplit(".", 1)[0]
+                            st = split_column_id(pred)[0]
                             if st not in source_tables:
                                 source_tables.append(st)
                         ed = state.lineage_graph.edges[pred, node].get("data")
@@ -308,7 +309,7 @@ def search(q: str):
     results = []
     for node in state.lineage_graph.nodes():
         if q_lower in node.lower() and "." in node:
-            table, col = node.rsplit(".", 1)
+            table, col = split_column_id(node)
             results.append({"id": node, "table": table, "column": col})
     return results
 
