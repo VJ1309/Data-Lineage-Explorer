@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from lineage.models import LineageEdge
 from parsers.sql import parse_sql as _parse_sql
-from parsers.sql import _detect_temp_views, _resolve_temp_views
+from parsers.sql import detect_temp_views, resolve_temp_views
 
 
 def _get_string_value(node: ast.expr) -> str | None:
@@ -163,7 +163,7 @@ class _DataFrameTracker(ast.NodeVisitor):
             # df = spark.sql("SELECT ...") — parse SQL and emit edges directly
             sql_str = self._get_spark_sql(value)
             if sql_str:
-                self.temp_views.update(_detect_temp_views(sql_str))
+                self.temp_views.update(detect_temp_views(sql_str))
                 sql_edges = _parse_sql(
                     sql_str,
                     source_file=self.source_file,
@@ -308,7 +308,7 @@ class _DataFrameTracker(ast.NodeVisitor):
         # Handle standalone spark.sql("...") calls (e.g., CREATE VIEW)
         sql_str = self._get_spark_sql(call)
         if sql_str:
-            self.temp_views.update(_detect_temp_views(sql_str))
+            self.temp_views.update(detect_temp_views(sql_str))
             sql_edges = _parse_sql(
                 sql_str,
                 source_file=self.source_file,
@@ -404,7 +404,7 @@ def _parse_databricks_py(code: str, source_file: str, _warnings: list[str] | Non
 
             if is_sql and content_lines:
                 sql = "\n".join(content_lines)
-                temp_views.update(_detect_temp_views(sql))
+                temp_views.update(detect_temp_views(sql))
                 sql_edges = _parse_sql(
                     sql,
                     source_file=source_file,
@@ -427,7 +427,7 @@ def _parse_databricks_py(code: str, source_file: str, _warnings: list[str] | Non
                 )
                 edges.extend(cell_edges)
 
-    return _resolve_temp_views(edges, temp_views)
+    return resolve_temp_views(edges, temp_views)
 
 
 def parse_pyspark(
@@ -458,5 +458,5 @@ def parse_pyspark(
 
     edges = tracker.edges
     if _resolve_views and tracker.temp_views:
-        edges = _resolve_temp_views(edges, tracker.temp_views)
+        edges = resolve_temp_views(edges, tracker.temp_views)
     return edges

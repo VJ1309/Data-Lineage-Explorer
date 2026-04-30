@@ -3,7 +3,13 @@ from __future__ import annotations
 import networkx as nx
 from lineage.ids import split_column_id
 from lineage.models import FileRecord, LineageEdge, ParseWarning
-from parsers.sql import parse_sql
+from parsers.sql import (
+    parse_sql,
+    DATABRICKS_SQL_SEP,
+    split_databricks_sql,
+    detect_temp_views,
+    resolve_temp_views,
+)
 from parsers.pyspark import parse_pyspark
 from parsers.notebook import parse_notebook
 
@@ -25,8 +31,22 @@ def _parse_file(
             if raw_edges_out is not None:
                 raw_edges_out.extend(edges)
         elif record.type == "sql":
-            edges = parse_sql(record.content, source_file=record.path, source_line=1,
-                              _warnings=sql_parse_errors, _raw_out=raw_edges_out)
+            if DATABRICKS_SQL_SEP in record.content:
+                cell_edges: list[LineageEdge] = []
+                temp_views: set[str] = set()
+                for cell_sql, cell_idx in split_databricks_sql(record.content):
+                    temp_views.update(detect_temp_views(cell_sql))
+                    cell_edges.extend(parse_sql(
+                        cell_sql, source_file=record.path, source_line=None,
+                        source_cell=cell_idx, _resolve_views=False,
+                        _warnings=sql_parse_errors,
+                    ))
+                if raw_edges_out is not None:
+                    raw_edges_out.extend(cell_edges)
+                edges = resolve_temp_views(cell_edges, temp_views)
+            else:
+                edges = parse_sql(record.content, source_file=record.path, source_line=1,
+                                  _warnings=sql_parse_errors, _raw_out=raw_edges_out)
         else:
             warnings.append(ParseWarning(
                 file=record.path,
