@@ -5,7 +5,7 @@ from parsers.sql import (
     detect_temp_views,
     resolve_temp_views,
 )
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 def _parse_sql_notebook(sql: str, source_file: str = "nb.sql") -> list:
@@ -70,9 +70,9 @@ def test_window_function():
 
 
 def test_bad_sql_returns_empty_not_raises():
-    edges = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
-    assert isinstance(edges, list)
-    assert len(edges) == 0
+    result = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
+    assert isinstance(result, ParseResult)
+    assert len(result.edges) == 0
 
 
 def test_multi_statement_sql():
@@ -587,13 +587,11 @@ def test_one_bad_statement_does_not_drop_good_statements():
     THIS IS NOT VALID SQL !!!###;
     INSERT INTO other_good SELECT name FROM source_table2;
     """
-    warnings_list: list[str] = []
-    edges = parse_sql(sql, source_file="mixed.sql", source_line=1,
-                     _warnings=warnings_list)
-    targets = {e.target_col for e in edges}
+    result = parse_sql(sql, source_file="mixed.sql", source_line=1)
+    targets = {e.target_col for e in result.edges}
     assert "good_table.id" in targets, "first good statement lost"
     assert "other_good.name" in targets, "third good statement lost"
-    assert warnings_list, "bad statement must surface a warning"
+    assert result.warnings, "bad statement must surface a warning"
 
 
 def test_unqualified_column_in_join_is_marked_unqualified():
@@ -977,17 +975,11 @@ def test_string_literal_in_union_all_branch_does_not_create_phantom_source():
 
 
 def test_bad_sql_collects_warning():
-    """SQLGlot parse failure must surface in _warnings when caller passes the list."""
-    warnings_list: list[str] = []
-    edges = parse_sql(
-        "THIS IS NOT SQL !!!###",
-        source_file="bad.sql",
-        source_line=1,
-        _warnings=warnings_list,
-    )
-    assert edges == []
-    assert len(warnings_list) == 1
-    assert warnings_list[0]  # non-empty error message
+    """SQLGlot parse failure must surface in ParseResult.warnings."""
+    result = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
+    assert result.edges == []
+    assert len(result.warnings) == 1
+    assert result.warnings[0]  # non-empty error message
 
 
 

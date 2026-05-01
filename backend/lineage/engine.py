@@ -2,7 +2,7 @@
 from __future__ import annotations
 import networkx as nx
 from lineage.ids import split_column_id
-from lineage.models import FileRecord, LineageEdge, ParseWarning
+from lineage.models import FileRecord, LineageEdge, ParseResult, ParseWarning
 from parsers.sql import (
     parse_sql,
     DATABRICKS_SQL_SEP,
@@ -16,37 +16,36 @@ from parsers.notebook import parse_notebook
 
 def _parse_file(
     record: FileRecord,
-    raw_edges_out: list[LineageEdge] | None = None,
-) -> tuple[list[LineageEdge], list[ParseWarning]]:
-    edges: list[LineageEdge] = []
+) -> tuple[list[LineageEdge], list[LineageEdge], list[ParseWarning]]:
+    result: ParseResult = ParseResult()
     warnings: list[ParseWarning] = []
-    sql_parse_errors: list[str] = []
     try:
         if record.type == "notebook":
-            edges = parse_notebook(record.content, source_file=record.path,
-                                   _warnings=sql_parse_errors, _raw_out=raw_edges_out)
+            result = parse_notebook(record.content, source_file=record.path)
         elif record.type == "python":
-            edges = parse_pyspark(record.content, source_file=record.path,
-                                  _warnings=sql_parse_errors)
-            if raw_edges_out is not None:
-                raw_edges_out.extend(edges)
+            result = parse_pyspark(record.content, source_file=record.path)
         elif record.type == "sql":
             if DATABRICKS_SQL_SEP in record.content:
                 cell_edges: list[LineageEdge] = []
+                cell_raw: list[LineageEdge] = []
+                cell_warnings: list[str] = []
                 temp_views: set[str] = set()
                 for cell_sql, cell_idx in split_databricks_sql(record.content):
                     temp_views.update(detect_temp_views(cell_sql))
-                    cell_edges.extend(parse_sql(
+                    r = parse_sql(
                         cell_sql, source_file=record.path, source_line=None,
                         source_cell=cell_idx, _resolve_views=False,
-                        _warnings=sql_parse_errors,
-                    ))
-                if raw_edges_out is not None:
-                    raw_edges_out.extend(cell_edges)
-                edges = resolve_temp_views(cell_edges, temp_views)
+                    )
+                    cell_edges.extend(r.edges)
+                    cell_raw.extend(r.raw_edges)
+                    cell_warnings.extend(r.warnings)
+                result = ParseResult(
+                    edges=resolve_temp_views(cell_edges, temp_views),
+                    raw_edges=cell_raw,
+                    warnings=cell_warnings,
+                )
             else:
-                edges = parse_sql(record.content, source_file=record.path, source_line=1,
-                                  _warnings=sql_parse_errors, _raw_out=raw_edges_out)
+                result = parse_sql(record.content, source_file=record.path, source_line=1)
         else:
             warnings.append(ParseWarning(
                 file=record.path,
@@ -54,9 +53,9 @@ def _parse_file(
             ))
     except Exception as exc:
         warnings.append(ParseWarning(file=record.path, error=str(exc)))
-    for err in sql_parse_errors:
+    for err in result.warnings:
         warnings.append(ParseWarning(file=record.path, error=f"SQL parse error: {err}"))
-    return edges, warnings
+    return result.edges, result.raw_edges, warnings
 
 
 def _normalize_edges(
@@ -155,9 +154,10 @@ def build_graph_with_warnings(
     all_edges: list[LineageEdge] = []
     all_raw_edges: list[LineageEdge] = []
     for record in records:
-        edges, warnings = _parse_file(record, raw_edges_out=all_raw_edges)
+        edges, raw_edges, warnings = _parse_file(record)
         all_warnings.extend(warnings)
         all_edges.extend(edges)
+        all_raw_edges.extend(raw_edges)
 
     # Normalize identifiers: lowercase + resolve short table names
     all_edges, ambiguous = _normalize_edges(all_edges)

@@ -6,7 +6,7 @@ import sqlglot
 _TVF_SANITIZE_RE = re.compile(r'[^a-zA-Z0-9_]')
 import sqlglot.expressions as exp
 from sqlglot import tokens
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 def _split_top_level_statements(sql: str) -> list[str]:
@@ -1092,27 +1092,25 @@ def parse_sql(
     source_line: int | None,
     source_cell: int | None = None,
     _resolve_views: bool = True,
-    _warnings: list[str] | None = None,
-    _raw_out: list[LineageEdge] | None = None,
-) -> list[LineageEdge]:
-    """Parse SQL (single or multi-statement) and return column-level lineage edges.
+) -> ParseResult:
+    """Parse SQL (single or multi-statement) and return a ParseResult.
 
     Supports multiple statements separated by semicolons.
     Uses "result" as the synthetic target table name when no INTO/CREATE is present.
-    Returns empty list on parse error (non-fatal).
+    Parse errors are collected in ParseResult.warnings (non-fatal).
 
     Multi-cell Databricks notebook dispatch (COMMAND ---------- splitting) is handled
     by the caller (engine._parse_file) using split_databricks_sql / detect_temp_views /
     resolve_temp_views. Call this function with a single SQL string only.
     """
+    local_warnings: list[str] = []
     statements: list[exp.Expression] = []
     for stmt_sql in _split_top_level_statements(sql):
         try:
             parsed = sqlglot.parse_one(_normalize_double_quotes(stmt_sql), dialect="databricks")
         except Exception as exc:
-            if _warnings is not None:
-                preview = stmt_sql.strip().splitlines()[0][:80]
-                _warnings.append(f"{exc} (near: {preview!r})")
+            preview = stmt_sql.strip().splitlines()[0][:80]
+            local_warnings.append(f"{exc} (near: {preview!r})")
             continue
         if parsed is not None:
             statements.append(parsed)
@@ -1125,8 +1123,7 @@ def parse_sql(
         edges.extend(
             _parse_single_statement(statement, source_file, source_line, source_cell)
         )
-    if _raw_out is not None:
-        _raw_out.extend(edges)
+    raw_edges = list(edges)
     if _resolve_views and temp_views:
-        return resolve_temp_views(edges, temp_views)
-    return edges
+        edges = resolve_temp_views(edges, temp_views)
+    return ParseResult(edges=edges, raw_edges=raw_edges, warnings=local_warnings)

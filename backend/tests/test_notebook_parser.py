@@ -1,6 +1,6 @@
 import json
 from parsers.notebook import parse_notebook
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 def _make_notebook(cells: list[dict]) -> str:
@@ -68,8 +68,9 @@ def test_markdown_cells_skipped():
 
 
 def test_bad_json_returns_empty():
-    edges = parse_notebook("not json at all", source_file="bad.ipynb")
-    assert edges == []
+    result = parse_notebook("not json at all", source_file="bad.ipynb")
+    assert isinstance(result, ParseResult)
+    assert result.edges == []
 
 
 def test_cross_cell_temp_view_resolution():

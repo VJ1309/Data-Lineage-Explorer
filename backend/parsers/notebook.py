@@ -3,7 +3,7 @@ from __future__ import annotations
 import nbformat
 from parsers.sql import parse_sql, detect_temp_views, resolve_temp_views
 from parsers.pyspark import parse_pyspark
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 _SQL_MAGICS = ("%sql", "%%sql", "%spark.sql")
@@ -25,16 +25,15 @@ def _strip_sql_magic(source: str) -> str:
 def parse_notebook(
     content: str,
     source_file: str,
-    _warnings: list[str] | None = None,
-    _raw_out: list[LineageEdge] | None = None,
-) -> list[LineageEdge]:
-    """Parse a Jupyter notebook JSON string and return all lineage edges."""
+) -> ParseResult:
+    """Parse a Jupyter notebook JSON string and return a ParseResult."""
     try:
         nb = nbformat.reads(content, as_version=4)
     except Exception:
-        return []
+        return ParseResult()
 
     edges: list[LineageEdge] = []
+    local_warnings: list[str] = []
     temp_views: set[str] = set()
 
     for cell_idx, cell in enumerate(nb.cells):
@@ -50,24 +49,26 @@ def parse_notebook(
         if _is_sql_cell(source) or lang == "sql":
             sql = _strip_sql_magic(source)
             temp_views.update(detect_temp_views(sql))
-            cell_edges = parse_sql(
+            _result = parse_sql(
                 sql,
                 source_file=source_file,
                 source_line=None,
                 source_cell=cell_idx,
                 _resolve_views=False,  # resolution happens at notebook level
-                _warnings=_warnings,
             )
+            cell_edges = _result.edges
+            local_warnings.extend(_result.warnings)
         else:
-            cell_edges = parse_pyspark(
+            _result = parse_pyspark(
                 source,
                 source_file=source_file,
                 source_cell=cell_idx,
-                _warnings=_warnings,
             )
+            cell_edges = _result.edges
+            local_warnings.extend(_result.warnings)
 
         edges.extend(cell_edges)
 
-    if _raw_out is not None:
-        _raw_out.extend(edges)
-    return resolve_temp_views(edges, temp_views)
+    raw_edges = list(edges)
+    resolved = resolve_temp_views(edges, temp_views)
+    return ParseResult(edges=resolved, raw_edges=raw_edges, warnings=local_warnings)
