@@ -1,31 +1,51 @@
 """Lineage engine: builds and queries a NetworkX DAG from FileRecords."""
 from __future__ import annotations
 import networkx as nx
-from lineage.models import FileRecord, LineageEdge, ParseWarning
-from parsers.sql import parse_sql
+from lineage.ids import split_column_id
+from lineage.models import FileRecord, LineageEdge, ParseResult, ParseWarning
+from parsers.sql import (
+    parse_sql,
+    DATABRICKS_SQL_SEP,
+    split_databricks_sql,
+    detect_temp_views,
+    resolve_temp_views,
+)
 from parsers.pyspark import parse_pyspark
 from parsers.notebook import parse_notebook
 
 
 def _parse_file(
     record: FileRecord,
-    raw_edges_out: list[LineageEdge] | None = None,
-) -> tuple[list[LineageEdge], list[ParseWarning]]:
-    edges: list[LineageEdge] = []
+) -> tuple[list[LineageEdge], list[LineageEdge], list[ParseWarning]]:
+    result: ParseResult = ParseResult()
     warnings: list[ParseWarning] = []
-    sql_parse_errors: list[str] = []
     try:
         if record.type == "notebook":
-            edges = parse_notebook(record.content, source_file=record.path,
-                                   _warnings=sql_parse_errors, _raw_out=raw_edges_out)
+            result = parse_notebook(record.content, source_file=record.path)
         elif record.type == "python":
-            edges = parse_pyspark(record.content, source_file=record.path,
-                                  _warnings=sql_parse_errors)
-            if raw_edges_out is not None:
-                raw_edges_out.extend(edges)
+            result = parse_pyspark(record.content, source_file=record.path)
         elif record.type == "sql":
-            edges = parse_sql(record.content, source_file=record.path, source_line=1,
-                              _warnings=sql_parse_errors, _raw_out=raw_edges_out)
+            if DATABRICKS_SQL_SEP in record.content:
+                cell_edges: list[LineageEdge] = []
+                cell_raw: list[LineageEdge] = []
+                cell_warnings: list[str] = []
+                temp_views: set[str] = set()
+                for cell_sql, cell_idx in split_databricks_sql(record.content):
+                    temp_views.update(detect_temp_views(cell_sql))
+                    r = parse_sql(
+                        cell_sql, source_file=record.path, source_line=None,
+                        source_cell=cell_idx, _resolve_views=False,
+                    )
+                    cell_edges.extend(r.edges)
+                    cell_raw.extend(r.raw_edges)
+                    cell_warnings.extend(r.warnings)
+                result = ParseResult(
+                    edges=resolve_temp_views(cell_edges, temp_views),
+                    raw_edges=cell_raw,
+                    warnings=cell_warnings,
+                )
+            else:
+                result = parse_sql(record.content, source_file=record.path, source_line=1)
         else:
             warnings.append(ParseWarning(
                 file=record.path,
@@ -33,9 +53,9 @@ def _parse_file(
             ))
     except Exception as exc:
         warnings.append(ParseWarning(file=record.path, error=str(exc)))
-    for err in sql_parse_errors:
+    for err in result.warnings:
         warnings.append(ParseWarning(file=record.path, error=f"SQL parse error: {err}"))
-    return edges, warnings
+    return result.edges, result.raw_edges, warnings
 
 
 def _normalize_edges(
@@ -61,9 +81,9 @@ def _normalize_edges(
         src = e.source_col.lower()
         tgt = e.target_col.lower()
         if "." in src:
-            table_names.add(src.rsplit(".", 1)[0])
+            table_names.add(split_column_id(src)[0])
         if "." in tgt:
-            table_names.add(tgt.rsplit(".", 1)[0])
+            table_names.add(split_column_id(tgt)[0])
 
     # Step 2: Build a mapping from short names to their longest matching form.
     # Only merge when there is exactly one candidate; otherwise record as ambiguous.
@@ -104,7 +124,7 @@ def _normalize_edges(
         col_lower = col_id.lower()
         if "." not in col_lower:
             return col_lower
-        table, col = col_lower.rsplit(".", 1)
+        table, col = split_column_id(col_lower)
         resolved = short_to_long.get(table, table)
         return f"{resolved}.{col}"
 
@@ -134,9 +154,10 @@ def build_graph_with_warnings(
     all_edges: list[LineageEdge] = []
     all_raw_edges: list[LineageEdge] = []
     for record in records:
-        edges, warnings = _parse_file(record, raw_edges_out=all_raw_edges)
+        edges, raw_edges, warnings = _parse_file(record)
         all_warnings.extend(warnings)
         all_edges.extend(edges)
+        all_raw_edges.extend(raw_edges)
 
     # Normalize identifiers: lowercase + resolve short table names
     all_edges, ambiguous = _normalize_edges(all_edges)
@@ -264,7 +285,7 @@ def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 500) -> tup
                     result.append((pred, node, raw_graph.edges[pred, node].get("data")))
         # Wildcard expansion: if tbl.col, check tbl.* predecessors
         if "." in node:
-            tbl, col = node.rsplit(".", 1)
+            tbl, col = split_column_id(node)
             wc = f"{tbl}.*"
             if wc in raw_graph and wc not in visited:
                 for pred_wc in raw_graph.predecessors(wc):

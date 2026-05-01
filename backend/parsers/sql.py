@@ -6,7 +6,7 @@ import sqlglot
 _TVF_SANITIZE_RE = re.compile(r'[^a-zA-Z0-9_]')
 import sqlglot.expressions as exp
 from sqlglot import tokens
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 def _split_top_level_statements(sql: str) -> list[str]:
@@ -76,7 +76,7 @@ def _resolve_ctes(
 
     Chains in simple_map are resolved (cte2 → cte1 → actual_table).
     Multi-source CTEs are returned as parsed Select bodies so the caller can
-    treat them like inline subqueries via _resolve_temp_views.
+    treat them like inline subqueries via resolve_temp_views.
     """
     simple_map: dict[str, str] = {}
     multi_map: dict[str, list[exp.Select]] = {}
@@ -643,7 +643,7 @@ def _parse_merge(
 
     whens = merge.args.get("whens")
     if whens is None:
-        return _resolve_temp_views(edges, subquery_aliases)
+        return resolve_temp_views(edges, subquery_aliases)
 
     for when in whens.expressions:
         then = when.args.get("then")
@@ -699,7 +699,7 @@ def _parse_merge(
                             transform_type=transform_type,
                             expr_str=expr_str,
                         ))
-    return _resolve_temp_views(edges, subquery_aliases)
+    return resolve_temp_views(edges, subquery_aliases)
 
 
 def _wildcard_edge(
@@ -808,7 +808,7 @@ def _parse_single_statement(
     subquery_aliases: set[str] = set()
     edges: list[LineageEdge] = []
 
-    # Parse multi-source (JOINed) CTEs as virtual subqueries so _resolve_temp_views
+    # Parse multi-source (JOINed) CTEs as virtual subqueries so resolve_temp_views
     # can short-circuit them just like inline subqueries / temp views.
     for cte_alias, cte_selects in multi_cte_bodies.items():
         subquery_aliases.add(cte_alias)
@@ -825,10 +825,10 @@ def _parse_single_statement(
             source_file, source_line, source_cell,
             subquery_aliases=subquery_aliases,
         ))
-    return _resolve_temp_views(edges, subquery_aliases)
+    return resolve_temp_views(edges, subquery_aliases)
 
 
-def _resolve_temp_views(
+def resolve_temp_views(
     edges: list[LineageEdge],
     temp_views: set[str],
 ) -> list[LineageEdge]:
@@ -1030,7 +1030,7 @@ def _resolve_temp_views(
     return resolved
 
 
-def _detect_temp_views(sql_text: str) -> set[str]:
+def detect_temp_views(sql_text: str) -> set[str]:
     """Parse SQL to find temp view names without extracting full lineage."""
     try:
         statements = sqlglot.parse(sql_text, dialect="databricks")
@@ -1058,14 +1058,14 @@ def _normalize_double_quotes(sql: str) -> str:
 
 
 _DATABRICKS_SQL_HEADER = "-- Databricks notebook source"
-_DATABRICKS_SQL_SEP = "-- COMMAND ----------"
+DATABRICKS_SQL_SEP = "-- COMMAND ----------"
 
 
-def _split_databricks_sql(sql: str) -> list[tuple[str, int]]:
+def split_databricks_sql(sql: str) -> list[tuple[str, int]]:
     """Split a Databricks-exported .sql notebook into (cell_sql, cell_index) pairs."""
     cells: list[tuple[str, int]] = []
     cell_idx = 0
-    for chunk in sql.split(_DATABRICKS_SQL_SEP):
+    for chunk in sql.split(DATABRICKS_SQL_SEP):
         # Strip the header comment and whitespace
         cleaned = chunk.strip()
         if cleaned == _DATABRICKS_SQL_HEADER.strip():
@@ -1092,39 +1092,25 @@ def parse_sql(
     source_line: int | None,
     source_cell: int | None = None,
     _resolve_views: bool = True,
-    _warnings: list[str] | None = None,
-    _raw_out: list[LineageEdge] | None = None,
-) -> list[LineageEdge]:
-    """Parse SQL (single or multi-statement) and return column-level lineage edges.
+) -> ParseResult:
+    """Parse SQL (single or multi-statement) and return a ParseResult.
 
     Supports multiple statements separated by semicolons.
-    Detects Databricks-exported .sql notebooks and splits on '-- COMMAND ----------'.
     Uses "result" as the synthetic target table name when no INTO/CREATE is present.
-    Returns empty list on parse error (non-fatal).
-    """
-    # Detect Databricks SQL notebook format
-    if _DATABRICKS_SQL_SEP in sql and source_cell is None:
-        edges: list[LineageEdge] = []
-        temp_views: set[str] = set()
-        for cell_sql, cell_idx in _split_databricks_sql(sql):
-            temp_views.update(_detect_temp_views(cell_sql))
-            edges.extend(
-                parse_sql(cell_sql, source_file, source_line=None,
-                          source_cell=cell_idx, _resolve_views=False,
-                          _warnings=_warnings)
-            )
-        if _raw_out is not None:
-            _raw_out.extend(edges)
-        return _resolve_temp_views(edges, temp_views)
+    Parse errors are collected in ParseResult.warnings (non-fatal).
 
+    Multi-cell Databricks notebook dispatch (COMMAND ---------- splitting) is handled
+    by the caller (engine._parse_file) using split_databricks_sql / detect_temp_views /
+    resolve_temp_views. Call this function with a single SQL string only.
+    """
+    local_warnings: list[str] = []
     statements: list[exp.Expression] = []
     for stmt_sql in _split_top_level_statements(sql):
         try:
             parsed = sqlglot.parse_one(_normalize_double_quotes(stmt_sql), dialect="databricks")
         except Exception as exc:
-            if _warnings is not None:
-                preview = stmt_sql.strip().splitlines()[0][:80]
-                _warnings.append(f"{exc} (near: {preview!r})")
+            preview = stmt_sql.strip().splitlines()[0][:80]
+            local_warnings.append(f"{exc} (near: {preview!r})")
             continue
         if parsed is not None:
             statements.append(parsed)
@@ -1137,8 +1123,7 @@ def parse_sql(
         edges.extend(
             _parse_single_statement(statement, source_file, source_line, source_cell)
         )
-    if _raw_out is not None:
-        _raw_out.extend(edges)
+    raw_edges = list(edges)
     if _resolve_views and temp_views:
-        return _resolve_temp_views(edges, temp_views)
-    return edges
+        edges = resolve_temp_views(edges, temp_views)
+    return ParseResult(edges=edges, raw_edges=raw_edges, warnings=local_warnings)

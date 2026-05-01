@@ -1,6 +1,6 @@
 import pytest
 from parsers.pyspark import parse_pyspark
-from lineage.models import LineageEdge
+from lineage.models import LineageEdge, ParseResult
 
 
 SIMPLE_SELECT = """\
@@ -271,9 +271,9 @@ def test_databricks_notebook_skips_markdown():
 def test_regular_python_not_treated_as_databricks():
     """Files without the Databricks header should parse normally."""
     code = 'df = spark.read.table("t1")\ndf.write.saveAsTable("t2")'
-    edges = parse_pyspark(code, source_file="regular.py")
+    result = parse_pyspark(code, source_file="regular.py")
     # Should not crash or misbehave
-    assert isinstance(edges, list)
+    assert isinstance(result, ParseResult)
 
 
 SPARK_SQL_CROSS_CALL_TEMP_VIEW = '''\

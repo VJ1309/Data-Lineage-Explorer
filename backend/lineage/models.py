@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from __future__ import annotations
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -57,3 +58,20 @@ class ParseWarning:
     file: str
     error: str
     severity: Literal["info", "warn", "error"] = "warn"
+
+
+@dataclass
+class ParseResult:
+    """Structured return type for all parsers."""
+    edges: list[LineageEdge] = field(default_factory=list)
+    raw_edges: list[LineageEdge] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def __iter__(self):
+        return iter(self.edges)
+
+    def __len__(self):
+        return len(self.edges)
+
+    def __getitem__(self, key):
+        return self.edges[key]

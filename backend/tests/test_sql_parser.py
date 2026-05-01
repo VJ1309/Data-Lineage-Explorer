@@ -1,5 +1,24 @@
-from parsers.sql import parse_sql
-from lineage.models import LineageEdge
+from parsers.sql import (
+    parse_sql,
+    DATABRICKS_SQL_SEP,
+    split_databricks_sql,
+    detect_temp_views,
+    resolve_temp_views,
+)
+from lineage.models import LineageEdge, ParseResult
+
+
+def _parse_sql_notebook(sql: str, source_file: str = "nb.sql") -> list:
+    """Parse multi-cell Databricks SQL, mirroring engine._parse_file dispatch."""
+    all_edges = []
+    temp_views: set = set()
+    for cell_sql, cell_idx in split_databricks_sql(sql):
+        temp_views.update(detect_temp_views(cell_sql))
+        all_edges.extend(parse_sql(
+            cell_sql, source_file=source_file, source_line=None,
+            source_cell=cell_idx, _resolve_views=False,
+        ))
+    return resolve_temp_views(all_edges, temp_views)
 
 
 def test_simple_select_passthrough():
@@ -51,9 +70,9 @@ def test_window_function():
 
 
 def test_bad_sql_returns_empty_not_raises():
-    edges = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
-    assert isinstance(edges, list)
-    assert len(edges) == 0
+    result = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
+    assert isinstance(result, ParseResult)
+    assert len(result.edges) == 0
 
 
 def test_multi_statement_sql():
@@ -135,7 +154,7 @@ SELECT customer_id, SUM(amount) AS total
 FROM stg
 GROUP BY customer_id
 """
-    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    edges = _parse_sql_notebook(sql)
     targets = {e.target_col for e in edges}
     # stg is a temp view — its edges should be resolved through
     assert "stg.order_id" not in targets
@@ -156,7 +175,7 @@ SELECT a FROM t1
 -- COMMAND ----------
 SELECT b FROM t2
 """
-    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    edges = _parse_sql_notebook(sql)
     t1_edges = [e for e in edges if "t1" in e.source_col]
     t2_edges = [e for e in edges if "t2" in e.source_col]
     assert all(e.source_cell == 1 for e in t1_edges)
@@ -171,7 +190,7 @@ def test_databricks_sql_notebook_skips_comment_cells():
 -- COMMAND ----------
 SELECT x FROM src
 """
-    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    edges = _parse_sql_notebook(sql)
     assert len(edges) == 1
     assert edges[0].source_col == "src.x"
 
@@ -210,7 +229,7 @@ SELECT id, val FROM step1
 INSERT INTO final_table
 SELECT id, val FROM step2
 """
-    edges = parse_sql(sql, source_file="nb.sql", source_line=None)
+    edges = _parse_sql_notebook(sql)
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     # Both temp views should be resolved away
@@ -568,13 +587,11 @@ def test_one_bad_statement_does_not_drop_good_statements():
     THIS IS NOT VALID SQL !!!###;
     INSERT INTO other_good SELECT name FROM source_table2;
     """
-    warnings_list: list[str] = []
-    edges = parse_sql(sql, source_file="mixed.sql", source_line=1,
-                     _warnings=warnings_list)
-    targets = {e.target_col for e in edges}
+    result = parse_sql(sql, source_file="mixed.sql", source_line=1)
+    targets = {e.target_col for e in result.edges}
     assert "good_table.id" in targets, "first good statement lost"
     assert "other_good.name" in targets, "third good statement lost"
-    assert warnings_list, "bad statement must surface a warning"
+    assert result.warnings, "bad statement must surface a warning"
 
 
 def test_unqualified_column_in_join_is_marked_unqualified():
@@ -891,7 +908,7 @@ WITH CALCULATED_FINAL AS (
 INSERT INTO uc_dc_dev.sc_wrk.smt_trx_so_po_emea_calc
 SELECT CALCULATED_FINAL.SRC_SYS_CD, CALCULATED_FINAL.KEY_ID_REF_NUM FROM CALCULATED_FINAL;
 """
-    edges = parse_sql(sql, source_file="SC_WRK.SMT_TRX_SO_PO_EMEA_CALC.sql", source_line=None)
+    edges = _parse_sql_notebook(sql, source_file="SC_WRK.SMT_TRX_SO_PO_EMEA_CALC.sql")
     source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
     # final_so_po_data must not appear as a source — it must be resolved through
     assert "final_so_po_data" not in source_tables, (
@@ -958,17 +975,11 @@ def test_string_literal_in_union_all_branch_does_not_create_phantom_source():
 
 
 def test_bad_sql_collects_warning():
-    """SQLGlot parse failure must surface in _warnings when caller passes the list."""
-    warnings_list: list[str] = []
-    edges = parse_sql(
-        "THIS IS NOT SQL !!!###",
-        source_file="bad.sql",
-        source_line=1,
-        _warnings=warnings_list,
-    )
-    assert edges == []
-    assert len(warnings_list) == 1
-    assert warnings_list[0]  # non-empty error message
+    """SQLGlot parse failure must surface in ParseResult.warnings."""
+    result = parse_sql("THIS IS NOT SQL !!!###", source_file="bad.sql", source_line=1)
+    assert result.edges == []
+    assert len(result.warnings) == 1
+    assert result.warnings[0]  # non-empty error message
 
 
 
@@ -986,7 +997,7 @@ def test_temp_view_with_mixed_case_in_databricks_notebook():
         "INSERT INTO uc_dev.gold.final",
         "SELECT id, val FROM MY_STAGING",
     ])
-    edges = parse_sql(sql, source_file="nb.sql", source_line=1)
+    edges = _parse_sql_notebook(sql)
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "uc_dev.raw.source_tbl.id" in sources, "temp view must be resolved to base table"
@@ -1011,7 +1022,7 @@ def test_temp_view_uppercase_chain_in_databricks_notebook():
         "INSERT INTO uc_dev.gold.final",
         "SELECT id FROM MID_STAGE",
     ])
-    edges = parse_sql(sql, source_file="nb.sql", source_line=1)
+    edges = _parse_sql_notebook(sql)
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "uc_dev.raw.source_tbl.id" in sources
@@ -1031,7 +1042,7 @@ def test_temp_view_uppercase_wildcard_select_in_databricks_notebook():
         "INSERT INTO uc_dev.gold.final",
         "SELECT * FROM UPPER_STAGE",
     ])
-    edges = parse_sql(sql, source_file="nb.sql", source_line=1)
+    edges = _parse_sql_notebook(sql)
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert not any("upper_stage" in s for s in sources), "UPPER_STAGE must not leak as source"

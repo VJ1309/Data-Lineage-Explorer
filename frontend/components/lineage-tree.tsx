@@ -1,14 +1,8 @@
 "use client";
 import { useState } from "react";
 import type { LineageEdge } from "@/lib/api";
+import { splitColumnId } from "@/lib/utils";
 import { TransformBadge } from "./transform-badge";
-
-/** Split "catalog.schema.table.col" into [table, col] */
-function splitColId(id: string): [string, string] {
-  const dot = id.lastIndexOf(".");
-  if (dot === -1) return [id, ""];
-  return [id.slice(0, dot), id.slice(dot + 1)];
-}
 
 type TreeNode = {
   colId: string;
@@ -57,7 +51,7 @@ function TreeNodeRow({
 }) {
   const [open, setOpen] = useState(true);
   const hasChildren = node.children.length > 0;
-  const [table, col] = splitColId(node.colId);
+  const [table, col] = splitColumnId(node.colId);
 
   // Visual: leaf nodes in upstream are sources, leaf nodes in downstream are final targets
   const isLeaf = !hasChildren;
@@ -115,7 +109,7 @@ type Props = {
 export function LineageTree({ targetColId, upstream, downstream }: Props) {
   const upRoot = buildUpstreamTree(targetColId, upstream);
   const downRoot = buildDownstreamTree(targetColId, downstream);
-  const [table, col] = splitColId(targetColId);
+  const [table, col] = splitColumnId(targetColId);
 
   return (
     <div className="rounded-md border bg-background max-h-[500px] overflow-y-auto">
