@@ -4,6 +4,7 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { GitBranch } from "lucide-react";
 import { TransformBadge } from "./transform-badge";
 import type { LineageEdge } from "@/lib/api";
+import { splitColumnId } from "@/lib/utils";
 
 function detectLang(file: string | null): string {
   if (!file) return "sql";
@@ -33,9 +34,7 @@ export function ColumnInspector({
     );
   }
 
-  const dot = colId.lastIndexOf(".");
-  const col = dot === -1 ? colId : colId.slice(dot + 1);
-  const table = dot === -1 ? "" : colId.slice(0, dot);
+  const [table, col] = splitColumnId(colId);
 
   const incoming = edges.filter((e) => e.target_col === colId);
 
@@ -96,9 +95,7 @@ export function ColumnInspector({
             </p>
             <div className="rounded-md border border-border overflow-hidden">
               {incoming.map((e, i) => {
-                const srcDot = e.source_col.lastIndexOf(".");
-                const srcCol = srcDot === -1 ? e.source_col : e.source_col.slice(srcDot + 1);
-                const srcTbl = srcDot === -1 ? "" : e.source_col.slice(0, srcDot);
+                const [srcTbl, srcCol] = splitColumnId(e.source_col);
                 const srcTblShort = srcTbl.split(".").at(-1) || srcTbl;
                 const logic =
                   e.expression && e.expression !== "*" ? e.expression : null;

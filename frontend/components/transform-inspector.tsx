@@ -5,6 +5,7 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Copy, Search, GitBranch } from "lucide-react";
 import { TransformBadge } from "./transform-badge";
 import type { LineagePath, PathStep } from "@/lib/api";
+import { splitColumnId } from "@/lib/utils";
 
 type Props = {
   paths: LineagePath[];
@@ -46,9 +47,7 @@ const ROW_BORDER_ACTIVE: Record<string, string> = {
 };
 
 function colLabel(colId: string) {
-  const dot = colId.lastIndexOf(".");
-  const col = dot === -1 ? colId : colId.slice(dot + 1);
-  const tbl = dot === -1 ? "" : colId.slice(0, dot);
+  const [tbl, col] = splitColumnId(colId);
   return { col, tbl, full: colId };
 }
 

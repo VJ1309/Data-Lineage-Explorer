@@ -10,6 +10,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { LineageEdge } from "@/lib/api";
+import { splitColumnId } from "@/lib/utils";
 import { toPng } from "html-to-image";
 
 const TRANSFORM_COLOURS: Record<string, string> = {
@@ -28,12 +29,6 @@ type Props = {
   targetColId: string;
   onColumnClick?: (colId: string) => void;
 };
-
-function splitColId(id: string): [string, string] {
-  const dot = id.lastIndexOf(".");
-  if (dot === -1) return [id, ""];
-  return [id.slice(0, dot), id.slice(dot + 1)];
-}
 
 function layeredLayout(
   nodeIds: string[],
@@ -94,14 +89,14 @@ function toTableLevel(
 ): { nodes: { id: string }[]; edges: { source: string; target: string; count: number; types: Set<string> }[] } {
   const tables = new Set<string>();
   for (const id of colNodeIds) {
-    const [table] = splitColId(id);
+    const [table] = splitColumnId(id);
     tables.add(table);
   }
 
   const edgeMap = new Map<string, { count: number; types: Set<string> }>();
   for (const e of colEdges) {
-    const [srcTable] = splitColId(e.source_col);
-    const [tgtTable] = splitColId(e.target_col);
+    const [srcTable] = splitColumnId(e.source_col);
+    const [tgtTable] = splitColumnId(e.target_col);
     if (srcTable === tgtTable) continue;
     const key = `${srcTable}||${tgtTable}`;
     if (!edgeMap.has(key)) edgeMap.set(key, { count: 0, types: new Set() });
@@ -123,7 +118,7 @@ export function LineageGraph({ nodes, edges, targetColId, onColumnClick }: Props
   const [collapsed, setCollapsed] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [showJoinKeys, setShowJoinKeys] = useState(false);
-  const [targetTable] = splitColId(targetColId);
+  const [targetTable] = splitColumnId(targetColId);
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -229,7 +224,7 @@ export function LineageGraph({ nodes, edges, targetColId, onColumnClick }: Props
   const rfNodes: Node[] = useMemo(() => {
     if (!collapsed) {
       return visibleNodes.map((n) => {
-        const [table, col] = splitColId(n.id);
+        const [table, col] = splitColumnId(n.id);
         const pos = colPositions.get(n.id) ?? { x: 0, y: 0 };
         const isTarget = n.id === targetColId;
         const isPseudo = n.id.endsWith(".__filter__") || n.id.endsWith(".__joinkey__");
@@ -275,7 +270,7 @@ export function LineageGraph({ nodes, edges, targetColId, onColumnClick }: Props
       else if (isSource) { bg = "#1a2a1a"; border = "1px solid #4ade80"; color = "#86efac"; }
       else if (isSink) { bg = "#2a1a2a"; border = "1px solid #c084fc"; color = "#d8b4fe"; }
 
-      const colCount = visibleNodes.filter((cn) => splitColId(cn.id)[0] === n.id).length;
+      const colCount = visibleNodes.filter((cn) => splitColumnId(cn.id)[0] === n.id).length;
 
       return {
         id: n.id,
