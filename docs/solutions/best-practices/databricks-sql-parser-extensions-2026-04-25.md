@@ -11,6 +11,7 @@ applies_when:
   - Diagnosing silently-dropped column lineage edges
   - Working with SQLGlot AST nodes for Databricks dialect constructs
 tags: sql-parser, sqlglot, databricks, lineage, ast, column-lineage, pseudo-column
+last_updated: 2026-05-01
 ---
 
 # Extending the Databricks SQL Parser — Coverage Patterns and SQLGlot Pitfalls
@@ -25,47 +26,54 @@ The eight extensions implemented cover: QUALIFY/HAVING filter edges, extended ag
 
 ### R1 & R2 — QUALIFY and HAVING pseudo-column edges
 
-Both use the existing `__filter__` pattern but with distinct pseudo-column names (`__qualify__` for post-window filtering, `__having__` for post-aggregation filtering). Handle them **before** the main SELECT column walk in `_parse_select_node`:
+Both use the existing `__filter__` pattern but with distinct pseudo-column names (`__qualify__` for post-window filtering, `__having__` for post-aggregation filtering). They are handled by the shared `_emit_predicate_edges()` closure inside `_parse_select_node`, alongside the WHERE clause:
 
 ```python
-# In _parse_select_node, before the SELECT walk:
-qualify_node = select_node.args.get("qualify")
-if qualify_node:
-    for col in qualify_node.find_all(exp.Column):
+# In _parse_select_node — shared predicate edge emitter (closure):
+def _emit_predicate_edges(clause: exp.Expression | None, pseudo_col: str, transform_type: str) -> None:
+    if clause is None:
+        return
+    expr_str = clause.sql(dialect="databricks")
+    for col_ref in clause.find_all(exp.Column):
+        col_name = col_ref.name
+        if not col_name:
+            continue
+        src = f"{resolved_table}.{col_name}"
         edges.append(LineageEdge(
-            source_table=source_table, source_column=col.name,
-            target_table=target_table, target_column="__qualify__",
-            transform_type="filter", expression=qualify_node.sql(dialect="databricks"),
+            source_col=src,
+            target_col=f"{target_table}.{pseudo_col}",
+            transform_type=transform_type,
+            expression=expr_str,
+            source_file=source_file,
+            source_cell=source_cell,
+            source_line=source_line,
         ))
 
-having_node = select_node.args.get("having")
-if having_node:
-    for col in having_node.find_all(exp.Column):
-        edges.append(LineageEdge(
-            source_table=source_table, source_column=col.name,
-            target_table=target_table, target_column="__having__",
-            transform_type="filter", expression=having_node.sql(dialect="databricks"),
-        ))
+# Calls (after SELECT column walk):
+_emit_predicate_edges(select_node.args.get("where"),   "__filter__",   "filter")
+_emit_predicate_edges(select_node.args.get("qualify"), "__qualify__",  "filter")
+_emit_predicate_edges(select_node.args.get("having"),  "__having__",   "filter")
 ```
 
 `exp.Qualify` is parsed by the Databricks dialect — access it via `select_node.args.get("qualify")`. `exp.Having` is accessed via `select_node.args.get("having")`.
 
+Note: `LineageEdge` uses combined `source_col` and `target_col` fields (format: `"table.column"`), not separate `source_table`/`source_column`/`target_table`/`target_column` kwargs.
+
 ### R3 — Aggregate classification
 
-Add new SQLGlot expression types to the `_classify_transform` aggregation tuple:
+Add new SQLGlot expression types to the `isinstance` check inside `_classify_transform` in `parsers/sql.py`:
 
 ```python
-AGGREGATE_TYPES = (
-    exp.Count, exp.Sum, exp.Avg, exp.Max, exp.Min,
-    exp.ApproxDistinct,   # APPROX_COUNT_DISTINCT
-    exp.Quantile,         # PERCENTILE
-    exp.ApproxQuantile,   # PERCENTILE_APPROX
-    exp.Stddev,           # STDDEV / STDDEV_SAMP
-    exp.StddevSamp,
-    exp.StddevPop,
-    exp.Variance,         # VARIANCE / VAR_SAMP
-    exp.VarPop,
-)
+# In _classify_transform, the aggregation branch:
+for n in all_nodes:
+    if isinstance(n, (exp.Sum, exp.Count, exp.Avg, exp.Max, exp.Min,
+                      exp.ArrayAgg, exp.GroupConcat,
+                      exp.ApproxDistinct,   # APPROX_COUNT_DISTINCT
+                      exp.Quantile,         # PERCENTILE
+                      exp.ApproxQuantile,   # PERCENTILE_APPROX
+                      exp.Stddev, exp.StddevSamp, exp.StddevPop,
+                      exp.Variance)):       # VARIANCE / VAR_SAMP
+        return "aggregation", expr_str
 ```
 
 `exp.PercentileIf` does not exist in SQLGlot — use `exp.ApproxQuantile` for `PERCENTILE_APPROX`. Verify class names empirically with `sqlglot.expressions.__dict__` before adding.
@@ -85,64 +93,86 @@ Call this before `sqlglot.parse_one(sql, dialect="databricks")`. Apply per-state
 
 ### R5 — MERGE USING subquery lineage
 
-When `using_node` in `_parse_merge` is `exp.Subquery` (not `exp.Table`), extract column edges from the subquery source and register the subquery alias in `subquery_aliases` so temp-view resolution can chain through it:
+When `using_node` in `_parse_merge` is `exp.Subquery` (not `exp.Table`), extract column edges from the subquery body by calling `_parse_select_node` directly on each union-branch SELECT, and register the subquery alias in `subquery_aliases` so temp-view resolution can chain through it:
 
 ```python
 elif isinstance(using_node, exp.Subquery):
-    alias = using_node.alias or "__merge_src__"
-    subquery_aliases.add(alias)
-    sub_edges = _process_subquery(using_node.this, alias, _warnings)
-    edges.extend(sub_edges)
+    sub_alias = using_node.alias or _next_sub_alias()
+    alias_map[sub_alias] = sub_alias
+    source_tables.append(sub_alias)
+    subquery_aliases.add(sub_alias)
+
+# Then, after setting up alias_map, parse the subquery body:
+if isinstance(using_node, exp.Subquery):
+    sub_alias = next(iter(subquery_aliases), None)
+    if sub_alias:
+        sub_selects = _collect_union_selects(using_node.this) if using_node.this else []
+        for sub_sel in sub_selects:
+            edges.extend(_parse_select_node(
+                sub_sel, sub_alias, {}, source_file, source_line, source_cell,
+                subquery_aliases=subquery_aliases,
+            ))
 ```
 
-Call `_resolve_temp_views(edges, subquery_aliases)` at the end of `_parse_merge` to collapse subquery alias hops into direct source → target edges.
+Call `resolve_temp_views(edges, subquery_aliases)` at the end of `_parse_merge` to collapse subquery alias hops into direct source → target edges. (`resolve_temp_views` is now a public function exported from `parsers/sql.py`.)
 
 ### R6 — COPY INTO detect-and-degrade
 
-SQLGlot parses `COPY INTO` as `exp.Copy` (not `exp.Command`). Extract the target table from `statement.this` and emit a wildcard approximate edge:
+SQLGlot parses `COPY INTO` as `exp.Copy` (not `exp.Command`). Extract the qualified target table from `copy_stmt.this` and emit a wildcard approximate edge via the `_wildcard_edge` helper:
 
 ```python
-def _parse_copy(statement: exp.Copy, _warnings: list) -> list[LineageEdge]:
-    target = statement.this.name if statement.this else None
-    if not target:
+def _parse_copy(
+    copy_stmt: exp.Copy,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    if not isinstance(copy_stmt.this, exp.Table):
         return []
-    return [LineageEdge(
-        source_table="__file__", source_column="*",
-        target_table=target, target_column="*",
-        transform_type="passthrough", confidence="approximate",
-        expression="COPY INTO",
-    )]
+    target_table = _qualified_table_name(copy_stmt.this)
+    return [_wildcard_edge("__file__.*", f"{target_table}.*", source_file, source_line, source_cell)]
 ```
 
-Use `__file__` as the synthetic source name — it visually distinguishes file-load sources from SQL-derived ones in the lineage graph.
+Use `__file__` as the synthetic source prefix — it visually distinguishes file-load sources from SQL-derived ones in the lineage graph. `_wildcard_edge` sets `confidence="approximate"` and `qualified=False` automatically.
 
 ### R7 — CLONE detect-and-degrade
 
-`CLONE` and `SHALLOW CLONE` are parsed as `exp.Create` with a `clone` arg. `DEEP CLONE` falls to `exp.Command` (SQLGlot limitation):
+`CLONE` and `SHALLOW CLONE` are parsed as `exp.Create` with a `clone` arg — handled in `_parse_clone`. `DEEP CLONE` falls to `exp.Command` (SQLGlot limitation) — handled in `_parse_command_fallback`:
 
 ```python
-# exp.Create branch
-clone_node = statement.args.get("clone")
-if clone_node:
-    source = clone_node.this.name
-    target = statement.this.name
-    return [LineageEdge(source_table=source, source_column="*",
-                        target_table=target, target_column="*",
-                        transform_type="passthrough", confidence="approximate")]
+# _parse_clone for CLONE / SHALLOW CLONE (exp.Create + clone arg):
+def _parse_clone(
+    create_stmt: exp.Create,
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    clone_node = create_stmt.args.get("clone")
+    if not clone_node or not isinstance(create_stmt.this, exp.Table):
+        return []
+    target_table = _qualified_table_name(create_stmt.this)
+    if not (isinstance(clone_node, exp.Clone) and isinstance(clone_node.this, exp.Table)):
+        return []
+    source_table = _qualified_table_name(clone_node.this)
+    return [_wildcard_edge(f"{source_table}.*", f"{target_table}.*", source_file, source_line, source_cell)]
 
-# exp.Command fallback for DEEP CLONE
+# _parse_command_fallback for DEEP CLONE (exp.Command regex fallback):
 _DEEP_CLONE_RE = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(\S+)\s+DEEP\s+CLONE\s+(\S+)",
+    r'\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(\S+)\s+DEEP\s+CLONE\s+(\S+)',
     re.IGNORECASE,
 )
-def _parse_command_fallback(statement: exp.Command, _warnings: list) -> list[LineageEdge]:
-    text = statement.text or ""
-    m = _DEEP_CLONE_RE.search(text)
+
+def _parse_command_fallback(
+    cmd_text: str,          # receives statement.text, not the exp.Command object
+    source_file: str,
+    source_line: int | None,
+    source_cell: int | None,
+) -> list[LineageEdge]:
+    m = _DEEP_CLONE_RE.search(cmd_text)
     if m:
-        target, source = m.group(1), m.group(2)
-        return [LineageEdge(source_table=source, source_column="*",
-                            target_table=target, target_column="*",
-                            transform_type="passthrough", confidence="approximate")]
+        target_table = m.group(1).strip(';')
+        source_table = m.group(2).strip(';')
+        return [_wildcard_edge(f"{source_table}.*", f"{target_table}.*", source_file, source_line, source_cell)]
     return []
 ```
 
@@ -235,5 +265,6 @@ SELECT id, name FROM read_files('/mnt/landing/orders/*.parquet', format => 'parq
 - `backend/parsers/sql.py` — implementation; all patterns above live in `_parse_select_node`, `_parse_merge`, `_parse_copy`, `_parse_clone`, `_parse_command_fallback`
 - `backend/tests/test_sql_parser.py` — 19 tests covering R1–R8 (added in commit `5075543`)
 - `docs/brainstorms/2026-04-25-databricks-sql-parser-improvements-requirements.md` — original requirements with acceptance examples
+- `docs/solutions/architecture-patterns/backend-parser-state-refactor-patterns-2026-05-01.md` — `ParseResult` return type, helper signature conventions (`source_file`/`source_line`/`source_cell` provenance), `source_col`/`target_col` combined field format, promoted public helpers (`resolve_temp_views`, `detect_temp_views`, `split_databricks_sql`)
 - SQLGlot issue #6303 — double-quote identifier tokenization bug (Databricks dialect)
 - SQLGlot issue #3388 — COPY INTO falls to `exp.Command` (resolved for `exp.Copy` in current version, but DEEP CLONE still falls to Command)

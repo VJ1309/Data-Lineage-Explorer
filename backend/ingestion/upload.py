@@ -28,6 +28,6 @@ def ingest_zip(zip_bytes: bytes, source_ref: str) -> list[FileRecord]:
                     type=file_type,
                     source_ref=source_ref,
                 ))
-    except zipfile.BadZipFile:
-        pass
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Invalid ZIP file") from exc
     return records
