@@ -3,11 +3,12 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useState, useEffect } from "react";
 import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useLineage } from "@/lib/hooks";
+import { useLineage, usePaths } from "@/lib/hooks";
 import { LineageGraph } from "@/components/lineage-graph";
 import { LineageTree } from "@/components/lineage-tree";
-import { ColumnInspector } from "@/components/column-inspector";
+import { TransformInspector } from "@/components/transform-inspector";
 import { GitBranch } from "lucide-react";
+import { splitColumnId } from "@/lib/utils";
 
 function LineageContent() {
   const params = useSearchParams();
@@ -18,6 +19,16 @@ function LineageContent() {
   const [activeTab, setActiveTab] = useState("graph");
 
   const { data, isLoading, error } = useLineage(table, column);
+  const inspectedColId = selectedColId ?? data?.target ?? null;
+  const [inspectedTable, inspectedColumn] = inspectedColId
+    ? splitColumnId(inspectedColId)
+    : [null, null];
+  const {
+    data: pathsData,
+    isLoading: pathsLoading,
+    isError: pathsError,
+    error: pathsErrorValue,
+  } = usePaths(inspectedTable, inspectedColumn, activeTab === "transform");
 
   // Reset inspector when the viewed column changes
   useEffect(() => {
@@ -103,7 +114,13 @@ function LineageContent() {
         </TabsContent>
 
         <TabsContent value="transform" className="pt-4">
-          <ColumnInspector colId={selectedColId} edges={data.graph.edges} />
+          <TransformInspector
+            paths={pathsData?.paths ?? []}
+            truncated={pathsData?.truncated ?? false}
+            isLoading={pathsLoading}
+            isError={pathsError}
+            errorMessage={(pathsErrorValue as Error | null)?.message}
+          />
         </TabsContent>
       </Tabs>
     </div>

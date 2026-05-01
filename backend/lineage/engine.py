@@ -55,6 +55,10 @@ def _parse_file(
         warnings.append(ParseWarning(file=record.path, error=str(exc)))
     for err in result.warnings:
         warnings.append(ParseWarning(file=record.path, error=f"SQL parse error: {err}"))
+    for edge in result.edges:
+        edge.source_ref = record.source_ref
+    for edge in result.raw_edges:
+        edge.source_ref = record.source_ref
     return result.edges, result.raw_edges, warnings
 
 
@@ -117,6 +121,7 @@ def _normalize_edges(
                 source_line=e.source_line,
                 confidence=e.confidence,
                 qualified=e.qualified,
+                source_ref=e.source_ref,
             ))
         return normalized, ambiguous_list
 
@@ -140,6 +145,7 @@ def _normalize_edges(
             source_line=e.source_line,
             confidence=e.confidence,
             qualified=e.qualified,
+            source_ref=e.source_ref,
         ))
     return normalized, ambiguous_list
 

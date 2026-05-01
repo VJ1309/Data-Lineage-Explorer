@@ -43,6 +43,7 @@ class LineageEdge:
     source_line: int | None = None
     confidence: Literal["certain", "approximate"] = "certain"
     qualified: bool = True
+    source_ref: str = ""
 
 
 @dataclass

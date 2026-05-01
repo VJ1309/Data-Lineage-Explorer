@@ -180,6 +180,45 @@ def test_delete_source_removes_warnings():
     assert all(w["source_id"] != source_id for w in resp.json())
 
 
+def test_delete_source_only_removes_edges_for_that_source_when_filenames_overlap():
+    first_zip = _make_zip({
+        "q.sql": "INSERT INTO target_a SELECT amount FROM raw_a"
+    })
+    second_zip = _make_zip({
+        "q.sql": "INSERT INTO target_b SELECT qty FROM raw_b"
+    })
+
+    first_resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("first.zip", first_zip, "application/zip")},
+    )
+    first_id = first_resp.json()["id"]
+    client.post(f"/sources/{first_id}/refresh")
+
+    second_resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("second.zip", second_zip, "application/zip")},
+    )
+    second_id = second_resp.json()["id"]
+    client.post(f"/sources/{second_id}/refresh")
+
+    resp = client.delete(f"/sources/{first_id}")
+    assert resp.status_code == 200
+
+    resp = client.get("/tables")
+    tables = {t["table"] for t in resp.json()}
+    assert "target_a" not in tables
+    assert "raw_a" not in tables
+    assert "target_b" in tables
+    assert "raw_b" in tables
+
+    resp = client.get("/lineage", params={"table": "target_b", "column": "qty"})
+    assert resp.status_code == 200
+    assert any(e["source_col"] == "raw_b.qty" for e in resp.json()["upstream"])
+
+
 def test_warnings_endpoint():
     resp = client.get("/warnings")
     assert resp.status_code == 200

@@ -30,18 +30,25 @@ def _edge_to_dict(edge) -> dict:
     }
 
 
-def _remove_source_files(files: set[str]) -> None:
-    """Remove all edges contributed by `files` from both graphs, then drop orphan nodes."""
-    if not files:
+def _edge_belongs_to_source(edge, source_id: str, fallback_files: set[str]) -> bool:
+    edge_source = getattr(edge, "source_ref", "")
+    if edge_source:
+        return edge_source == source_id
+    return edge.source_file in fallback_files
+
+
+def _remove_source_edges(source_id: str, fallback_files: set[str]) -> None:
+    """Remove all edges contributed by a source from both graphs, then drop orphan nodes."""
+    if not source_id and not fallback_files:
         return
     edges = [(u, v) for u, v, d in state.lineage_graph.edges(data=True)
-             if d.get("data") and d["data"].source_file in files]
+             if d.get("data") and _edge_belongs_to_source(d["data"], source_id, fallback_files)]
     state.lineage_graph.remove_edges_from(edges)
     state.lineage_graph.remove_nodes_from(
         [n for n in state.lineage_graph.nodes() if state.lineage_graph.degree(n) == 0]
     )
     raw_edges = [(u, v) for u, v, d in state.raw_graph.edges(data=True)
-                 if d.get("data") and d["data"].source_file in files]
+                 if d.get("data") and _edge_belongs_to_source(d["data"], source_id, fallback_files)]
     state.raw_graph.remove_edges_from(raw_edges)
     state.raw_graph.remove_nodes_from(
         [n for n in state.raw_graph.nodes() if state.raw_graph.degree(n) == 0]
@@ -105,7 +112,7 @@ def delete_source(source_id: str):
         raise HTTPException(status_code=404, detail="Source not found")
     entry = state.source_registry.get(source_id)
     if entry:
-        _remove_source_files(entry.parsed_files)
+        _remove_source_edges(source_id, entry.parsed_files)
         state.parse_warnings = [
             w for w in state.parse_warnings if w.get("source_id") != source_id
         ]
@@ -149,7 +156,7 @@ def refresh_source(source_id: str):
     new_raw_graph: nx.DiGraph = new_graph.graph.pop("_raw_graph", nx.DiGraph())
 
     # Remove old contributions from this source before adding new ones
-    _remove_source_files(entry.parsed_files)
+    _remove_source_edges(source_id, entry.parsed_files)
 
     state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
     state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
