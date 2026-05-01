@@ -89,7 +89,10 @@ async def register_source(
     MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB
     if len(zip_bytes) > MAX_ZIP_BYTES:
         raise HTTPException(status_code=413, detail="ZIP file exceeds 50 MB limit")
-    entry.records = ingest_zip(zip_bytes, source_ref=source_id)
+    try:
+        entry.records = ingest_zip(zip_bytes, source_ref=source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     entry.url = file.filename or "upload"
 
     state.source_registry[source_id] = entry
@@ -103,6 +106,9 @@ def delete_source(source_id: str):
     entry = state.source_registry.get(source_id)
     if entry:
         _remove_source_files(entry.parsed_files)
+        state.parse_warnings = [
+            w for w in state.parse_warnings if w.get("source_id") != source_id
+        ]
     del state.source_registry[source_id]
     return {"ok": True}
 

@@ -22,6 +22,7 @@ def reset_state():
     import networkx as nx
     state.source_registry.clear()
     state.lineage_graph = nx.DiGraph()
+    state.raw_graph = nx.DiGraph()
     state.parse_warnings.clear()
     yield
 
@@ -57,6 +58,16 @@ def test_register_upload_source_and_refresh():
     assert resp.status_code == 200
     tables = resp.json()
     assert len(tables) > 0
+
+
+def test_register_upload_rejects_invalid_zip():
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", b"not a zip", "application/zip")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Invalid ZIP file"
 
 
 def test_get_columns_for_table():
@@ -147,6 +158,26 @@ def test_delete_source():
     assert resp.status_code == 200
     resp = client.get("/sources")
     assert all(s["id"] != source_id for s in resp.json())
+
+
+def test_delete_source_removes_warnings():
+    zip_bytes = _make_zip({"broken.py": "def f(:\n    pass"})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/warnings")
+    assert any(w["source_id"] == source_id for w in resp.json())
+
+    resp = client.delete(f"/sources/{source_id}")
+    assert resp.status_code == 200
+
+    resp = client.get("/warnings")
+    assert all(w["source_id"] != source_id for w in resp.json())
 
 
 def test_warnings_endpoint():

@@ -26,7 +26,7 @@ related_components:
 
 ## Context
 
-Three architecture violations were found during a review of the Transform tab PR: a 60-line DFS traversal implemented in the route layer instead of the engine layer; duplicated graph mutation code in two route handlers; and a React Query hook that fired on every page load regardless of which tab was active. None caused visible bugs, but all created maintenance debt and latent risk.
+Three architecture violations were found during a review of the Transform tab PR: a 60-line DFS traversal implemented in the route layer instead of the engine layer; duplicated graph mutation code in two route handlers; and a React Query hook that fired on every page load regardless of which tab was active. Later cleanup also tightened source lifecycle handling: source deletion must remove warnings for that source, invalid ZIP uploads must fail fast, and source mutations must invalidate all lineage-related frontend caches. None caused visible bugs, but all created maintenance debt and latent risk.
 
 ## Guidance
 
@@ -71,7 +71,7 @@ Engine functions are also independently testable without going through FastAPI.
 
 ### 2. Extract shared graph mutation to a helper
 
-`state.lineage_graph` and `state.raw_graph` are always mutated together when removing a source's contributions. Any code that mutates one must mutate the other with identical logic. Duplicated blocks will inevitably diverge.
+`state.lineage_graph` and `state.raw_graph` are always mutated together when removing a source's contributions. Any code that mutates one must mutate the other with identical logic. Duplicated blocks will inevitably diverge. Source deletion must also remove any `state.parse_warnings` entries for that source id; otherwise `/warnings` can show stale warnings for deleted sources.
 
 **Wrong (identical block in both `delete_source` and `refresh_source`):**
 ```python
@@ -102,7 +102,15 @@ def _remove_source_files(files: set[str]) -> None:
         [n for n in state.raw_graph.nodes() if state.raw_graph.degree(n) == 0])
 ```
 
-### 3. Gate expensive React Query calls with `enabled` + activation state
+In `delete_source`, call `_remove_source_files(entry.parsed_files)` and then filter `state.parse_warnings` by `source_id`.
+
+### 3. Reject invalid uploads at the route boundary
+
+`ingestion/upload.py` owns ZIP extraction and file classification. Invalid archives should not silently produce an empty source; they should raise `ValueError("Invalid ZIP file")`. `api/routes.py` catches that and returns `400 Invalid ZIP file`.
+
+This keeps ingestion framework-agnostic while making the API response explicit.
+
+### 4. Gate expensive React Query calls with `enabled` + activation state
 
 API calls that are expensive or only relevant to a specific UI state should not fire on every page load. Use React Query's `enabled` parameter combined with a boolean activation flag.
 
@@ -132,18 +140,40 @@ const { data: pathsData } = usePaths(table, column, transformActivated);
 
 The flag is a latch — it flips to `true` on first tab click and never resets. Once activated, React Query's own caching handles subsequent tab switches without re-fetching.
 
+### 5. Invalidate all lineage data after source mutations
+
+Source register, refresh, and delete all change the effective graph. In `frontend/lib/hooks.ts`, keep cache invalidation centralized in `invalidateLineageData()` and include every query family derived from source content:
+
+```typescript
+function invalidateLineageData(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["sources"] });
+  qc.invalidateQueries({ queryKey: ["source-files"] });
+  qc.invalidateQueries({ queryKey: ["tables"] });
+  qc.invalidateQueries({ queryKey: ["columns"] });
+  qc.invalidateQueries({ queryKey: ["lineage"] });
+  qc.invalidateQueries({ queryKey: ["paths"] });
+  qc.invalidateQueries({ queryKey: ["impact"] });
+  qc.invalidateQueries({ queryKey: ["search"] });
+  qc.invalidateQueries({ queryKey: ["warnings"] });
+}
+```
+
 ## Why This Matters
 
 - **Engine/route separation**: Without it, traversal logic accumulates in route handlers, making it untestable in isolation and difficult to locate. Future traversal functions will be added to the wrong layer by default.
-- **Shared mutation helper**: Two diverging copies of graph mutation code will eventually diverge — one gets a bug fix the other doesn't. The parallel `lineage_graph`/`raw_graph` state contract makes this especially risky because both must stay in sync.
+- **Shared mutation helper**: Two diverging copies of graph mutation code will eventually diverge — one gets a bug fix the other doesn't. The parallel `lineage_graph`/`raw_graph` state contract makes this especially risky because both must stay in sync, and warnings must not outlive their source.
+- **Explicit upload errors**: A silent empty source is harder to understand than a direct 400 response for an invalid archive.
 - **Lazy query activation**: Path tracing is a DFS that can produce many paths on highly connected graphs. Firing it unconditionally on every page load penalizes users who never open the Transform tab.
+- **Centralized cache invalidation**: Source changes affect almost every lineage view. A single invalidation helper prevents stale catalog, graph, impact, and warning UI after mutations.
 
 ## When to Apply
 
 - When adding a new graph traversal function — put it in `engine.py`, not `routes.py`
 - When a route handler grows beyond: request validation + one engine call + response shaping
 - When the same graph mutation block appears in more than one place in `routes.py`
+- When changing source registration, refresh, or deletion behavior
 - When adding a React Query hook that calls a computationally expensive endpoint
+- When adding a new query family derived from source content; include it in `invalidateLineageData()`
 
 ## Examples
 

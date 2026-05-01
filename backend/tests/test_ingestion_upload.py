@@ -1,5 +1,6 @@
 import io
 import zipfile
+import pytest
 from ingestion.upload import ingest_zip
 
 
@@ -46,3 +47,8 @@ def test_ingest_zip_source_ref_set():
     zip_bytes = _make_zip({"q.sql": "SELECT 1"})
     records = ingest_zip(zip_bytes, source_ref="my-upload-42")
     assert records[0].source_ref == "my-upload-42"
+
+
+def test_ingest_zip_rejects_invalid_zip():
+    with pytest.raises(ValueError, match="Invalid ZIP file"):
+        ingest_zip(b"not a zip", source_ref="upload")

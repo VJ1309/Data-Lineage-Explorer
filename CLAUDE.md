@@ -32,10 +32,10 @@ Dependencies are managed with `uv` (lockfile at `uv.lock`). The venv is at `../.
 
 **Entry point:** `main.py` — FastAPI app with CORS, mounts `api/routes.py`.
 
-**State:** `state.py` — module-level in-memory globals. `source_registry` (dict of source configs) and `lineage_graph` (NetworkX DiGraph) are rebuilt on each source refresh. All state is lost on server restart.
+**State:** `state.py` — module-level in-memory globals. `source_registry` (dict of source configs), `lineage_graph`, `raw_graph`, and `parse_warnings` are rebuilt/updated on each source refresh. All state is lost on server restart. When source data changes, keep `lineage_graph`, `raw_graph`, and `parse_warnings` in sync.
 
 **Data flow for a parse:**
-1. `ingestion/upload.py` — unzips uploaded file, classifies files by extension (`.sql` → sql, `.py` → python, `.ipynb` → notebook), returns `list[FileRecord]`
+1. `ingestion/upload.py` — unzips uploaded file, classifies files by extension (`.sql` → sql, `.py` → python, `.ipynb` → notebook), returns `list[FileRecord]`. Invalid ZIP files raise `ValueError`; `api/routes.py` translates that into `400 Invalid ZIP file`.
 2. `lineage/engine.py` — calls `_parse_file()` per record (dispatches to SQL/PySpark/notebook parser), collects all `LineageEdge` objects, runs `_normalize_edges()` (lowercase + suffix-match short table names to full `catalog.schema.table` form), builds NetworkX DAG
 3. `api/routes.py` — REST endpoints query the DAG using `engine.upstream()` / `engine.downstream()` (BFS)
 
@@ -49,6 +49,8 @@ Dependencies are managed with `uv` (lockfile at `uv.lock`). The venv is at `../.
 **Temp view resolution:** `_resolve_temp_views()` in `sql.py` short-circuits edges through `CREATE TEMP VIEW` — consumers of a temp view get edges directly from the temp view's sources. Chains of temp views are resolved in a single iterative pass.
 
 **Table roles** (returned by `/tables`): `source` (only read), `target` (only written), `intermediate` (both), `result` (standalone SELECT with no INSERT INTO target).
+
+**Source lifecycle:** `DELETE /sources/{id}` removes that source's parsed edges from both `lineage_graph` and `raw_graph`, drops orphan nodes, and removes warnings for the deleted source. Route tests reset all in-memory state, including `raw_graph`, before each test.
 
 ---
 
@@ -67,7 +69,7 @@ npm run lint     # ESLint
 
 **API proxy:** `app/api/backend/[...path]/route.ts` — all `/api/backend/*` requests are forwarded server-side to the backend using the `API_URL` env var (set in Vercel; defaults to `http://localhost:8000`). Never use `NEXT_PUBLIC_` for the backend URL — it bakes at build time.
 
-**API client:** `lib/api.ts` — typed fetch wrappers. `lib/hooks.ts` — React Query hooks (`useQuery` / `useMutation`) for all data fetching. Mutations invalidate relevant queries after success.
+**API client:** `lib/api.ts` — typed fetch wrappers. `lib/hooks.ts` — React Query hooks (`useQuery` / `useMutation`) for all data fetching. Source register/refresh/delete mutations call `invalidateLineageData()` so source files, tables, columns, lineage, paths, impact, search, and warnings do not stay stale after graph changes.
 
 **Pages:** `sources` (upload/manage), `catalog` (browse tables grouped by role), `lineage` (graph + tree + code tabs), `impact` (downstream analysis).
 
