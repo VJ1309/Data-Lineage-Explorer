@@ -2,7 +2,7 @@
 from __future__ import annotations
 import networkx as nx
 from lineage.ids import split_column_id
-from lineage.models import FileRecord, GraphResult, LineageEdge, ParseResult, ParseWarning
+from lineage.models import ColumnMeta, FileRecord, GraphResult, LineageEdge, ParseResult, ParseWarning
 from parsers.sql import (
     parse_sql,
     DATABRICKS_SQL_SEP,
@@ -282,6 +282,49 @@ def downstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:
                 visited_nodes.add(succ)
                 queue.append(succ)
     return edges
+
+
+def column_metadata(graph: nx.DiGraph, table: str) -> list[ColumnMeta]:
+    """Return ColumnMeta for every column node belonging to `table`.
+
+    Walks predecessors to build deduped, order-preserving source_tables and
+    expressions. edge_data is captured from preds[0] only — preserving the
+    current API contract where source_file/source_cell/source_line/transform_type
+    come from the first predecessor even when expressions aggregate across all.
+
+    Returns an empty list when no columns belong to `table` — the route layer
+    is responsible for raising 404.
+    """
+    cols: list[ColumnMeta] = []
+    for node in graph.nodes():
+        if "." not in node:
+            continue
+        t, col = split_column_id(node)
+        if t != table:
+            continue
+        preds = list(graph.predecessors(node))
+        edge_data = None
+        source_tables: list[str] = []
+        seen_exprs: list[str] = []
+        if preds:
+            edge_data = graph.edges[preds[0], node].get("data")
+            for pred in preds:
+                if "." in pred:
+                    st = split_column_id(pred)[0]
+                    if st not in source_tables:
+                        source_tables.append(st)
+                ed = graph.edges[pred, node].get("data")
+                if ed and ed.expression and ed.expression not in seen_exprs:
+                    seen_exprs.append(ed.expression)
+        cols.append(ColumnMeta(
+            node_id=node,
+            table=t,
+            column=col,
+            source_tables=source_tables,
+            expressions=seen_exprs,
+            edge_data=edge_data,
+        ))
+    return cols
 
 
 def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 500) -> tuple[list[list[dict]], bool]:

@@ -4,6 +4,7 @@ import uuid
 import networkx as nx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from lineage.engine import build_graph_with_warnings
+from lineage.engine import column_metadata as engine_column_metadata
 from lineage.engine import upstream as engine_upstream
 from lineage.engine import downstream as engine_downstream
 from lineage.engine import trace_paths as engine_trace_paths
@@ -198,43 +199,27 @@ def list_tables():
     return result
 
 
+def _column_meta_to_dict(m) -> dict:
+    e = m.edge_data
+    return {
+        "id": m.node_id,
+        "table": m.table,
+        "column": m.column,
+        "source_tables": m.source_tables,
+        "source_file": e.source_file if e else None,
+        "source_cell": e.source_cell if e else None,
+        "source_line": e.source_line if e else None,
+        "transform_type": e.transform_type if e else None,
+        "expression": "\n".join(m.expressions) if m.expressions else None,
+    }
+
+
 @router.get("/tables/{table}/columns")
 def list_columns(table: str):
-    cols = []
-    for node in state.lineage_graph.nodes():
-        if "." in node:
-            t, col = split_column_id(node)
-            if t == table:
-                preds = list(state.lineage_graph.predecessors(node))
-                edge_data = None
-                source_tables: list[str] = []
-                seen_exprs: list[str] = []
-                if preds:
-                    edge_data = state.lineage_graph.edges[preds[0], node].get("data")
-                    # Collect all distinct source tables and expressions for this column
-                    for pred in preds:
-                        if "." in pred:
-                            st = split_column_id(pred)[0]
-                            if st not in source_tables:
-                                source_tables.append(st)
-                        ed = state.lineage_graph.edges[pred, node].get("data")
-                        if ed and ed.expression and ed.expression not in seen_exprs:
-                            seen_exprs.append(ed.expression)
-                combined_expression = "\n".join(seen_exprs) if seen_exprs else None
-                cols.append({
-                    "id": node,
-                    "table": t,
-                    "column": col,
-                    "source_tables": source_tables,
-                    "source_file": edge_data.source_file if edge_data else None,
-                    "source_cell": edge_data.source_cell if edge_data else None,
-                    "source_line": edge_data.source_line if edge_data else None,
-                    "transform_type": edge_data.transform_type if edge_data else None,
-                    "expression": combined_expression,
-                })
-    if not cols:
+    cols_meta = engine_column_metadata(state.lineage_graph, table)
+    if not cols_meta:
         raise HTTPException(status_code=404, detail=f"Table '{table}' not found")
-    return cols
+    return [_column_meta_to_dict(m) for m in cols_meta]
 
 
 # ── Lineage / Impact ─────────────────────────────────────────────────────────

@@ -33,6 +33,22 @@ class ColumnNode:
 
 
 @dataclass
+class ColumnMeta:
+    """Per-column metadata returned by engine.column_metadata().
+
+    Carries the predecessor-aggregated source tables and expressions for one
+    column node, plus the LineageEdge from preds[0] (None when the column has
+    no predecessors). Routes shape this into the API dict.
+    """
+    node_id: str
+    table: str
+    column: str
+    source_tables: list[str]
+    expressions: list[str]
+    edge_data: "LineageEdge | None"
+
+
+@dataclass
 class LineageEdge:
     source_col: str
     target_col: str
