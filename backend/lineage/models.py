@@ -1,6 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import networkx as nx
 
 
 @dataclass
@@ -75,3 +78,21 @@ class ParseResult:
 
     def __getitem__(self, key):
         return self.edges[key]
+
+
+@dataclass
+class GraphResult:
+    """Engine return type for build_graph_with_warnings.
+
+    Carries both the deduped lineage DAG and the raw (pre-temp-view-resolution) DAG
+    that path tracing needs. raw_graph is populated whenever graph is — preserving
+    the dual-graph invariant documented in backend/AGENTS.md.
+
+    file_stats and error_files are populated by the engine's per-file statistics
+    helper so route handlers don't iterate edges themselves.
+    """
+    graph: "nx.DiGraph"
+    raw_graph: "nx.DiGraph"
+    warnings: list[ParseWarning] = field(default_factory=list)
+    file_stats: dict[str, dict] = field(default_factory=dict)
+    error_files: set[str] = field(default_factory=set)

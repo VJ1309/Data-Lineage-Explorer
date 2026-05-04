@@ -58,7 +58,8 @@ def test_parse_warnings_collected():
         FileRecord(path="bad.py", content="def (((broken:", type="python", source_ref="test"),
         _make_sql_record("SELECT amount FROM raw_orders"),
     ]
-    graph, warnings = build_graph_with_warnings(records)
+    result = build_graph_with_warnings(records)
+    graph, warnings = result.graph, result.warnings
     # bad.py parse fails silently — but the good SQL record still produces edges
     assert graph.number_of_edges() > 0
 
@@ -71,7 +72,8 @@ def test_sql_parse_error_surfaces_as_warning():
         type="sql",
         source_ref="test",
     )
-    _, warnings = build_graph_with_warnings([record])
+    result = build_graph_with_warnings([record])
+    warnings = result.warnings
     assert any("bad.sql" in w.file for w in warnings), (
         "parse error in bad.sql must produce a ParseWarning"
     )
@@ -85,7 +87,8 @@ def test_ambiguous_short_name_not_merged_and_warns():
     INSERT INTO downstream SELECT id FROM orders;
     """
     rec = FileRecord(path="f.sql", content=content, type="sql", source_ref="t")
-    graph, warnings = build_graph_with_warnings([rec])
+    result = build_graph_with_warnings([rec])
+    graph, warnings = result.graph, result.warnings
     nodes = set(graph.nodes())
     # Both fully-qualified forms must survive as distinct nodes
     assert "staging.orders.id" in nodes, f"staging.orders merged away; nodes={sorted(nodes)}"
@@ -102,7 +105,8 @@ def test_unambiguous_short_name_still_merges():
     INSERT INTO downstream SELECT id FROM orders;
     """
     rec = FileRecord(path="f.sql", content=content, type="sql", source_ref="t")
-    graph, warnings = build_graph_with_warnings([rec])
+    result = build_graph_with_warnings([rec])
+    graph = result.graph
     nodes = set(graph.nodes())
     # 'orders.id' short form should have been merged into 'uc.prod.orders.id'
     assert "uc.prod.orders.id" in nodes

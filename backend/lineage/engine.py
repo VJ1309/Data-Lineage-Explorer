@@ -2,7 +2,7 @@
 from __future__ import annotations
 import networkx as nx
 from lineage.ids import split_column_id
-from lineage.models import FileRecord, LineageEdge, ParseResult, ParseWarning
+from lineage.models import FileRecord, GraphResult, LineageEdge, ParseResult, ParseWarning
 from parsers.sql import (
     parse_sql,
     DATABRICKS_SQL_SEP,
@@ -144,10 +144,41 @@ def _normalize_edges(
     return normalized, ambiguous_list
 
 
-def build_graph_with_warnings(
-    records: list[FileRecord],
-) -> tuple[nx.DiGraph, list[ParseWarning]]:
-    """Parse all FileRecords and return a lineage DAG plus any parse warnings."""
+def _compute_file_stats(
+    graph: nx.DiGraph, warnings: list[ParseWarning]
+) -> tuple[dict[str, dict], set[str]]:
+    """Per-file edge/approximate/warning counts, plus the set of files with error severity.
+
+    Iterates the deduped DAG (graph.edges(data=True)) — not the raw pre-graph edge list —
+    so endpoint-pair duplicates collapse to a single edge_count increment. Must run after
+    any synthetic warnings (e.g., cycle detection) have been appended so file_stats
+    captures their warning_count.
+    """
+    file_stats: dict[str, dict] = {}
+    for _, _, d in graph.edges(data=True):
+        edge_data = d.get("data")
+        if edge_data and edge_data.source_file:
+            fname = edge_data.source_file
+            if fname not in file_stats:
+                file_stats[fname] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
+            file_stats[fname]["edge_count"] += 1
+            if edge_data.confidence == "approximate":
+                file_stats[fname]["approximate_count"] += 1
+
+    error_files: set[str] = set()
+    for w in warnings:
+        if w.file:
+            if w.file not in file_stats:
+                file_stats[w.file] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
+            file_stats[w.file]["warning_count"] += 1
+            if w.severity == "error":
+                error_files.add(w.file)
+
+    return file_stats, error_files
+
+
+def build_graph_with_warnings(records: list[FileRecord]) -> GraphResult:
+    """Parse all FileRecords and return a GraphResult bundling both DAGs, warnings, and per-file stats."""
     graph: nx.DiGraph = nx.DiGraph()
     all_warnings: list[ParseWarning] = []
 
@@ -178,7 +209,6 @@ def build_graph_with_warnings(
     raw_graph: nx.DiGraph = nx.DiGraph()
     for edge in all_raw_edges:
         raw_graph.add_edge(edge.source_col, edge.target_col, data=edge)
-    graph.graph["_raw_graph"] = raw_graph
 
     # Detect cycles and warn
     if not nx.is_directed_acyclic_graph(graph):
@@ -192,13 +222,20 @@ def build_graph_with_warnings(
         except nx.NetworkXNoCycle:
             pass
 
-    return graph, all_warnings
+    file_stats, error_files = _compute_file_stats(graph, all_warnings)
+
+    return GraphResult(
+        graph=graph,
+        raw_graph=raw_graph,
+        warnings=all_warnings,
+        file_stats=file_stats,
+        error_files=error_files,
+    )
 
 
 def build_graph(records: list[FileRecord]) -> nx.DiGraph:
     """Parse all FileRecords and return a lineage DAG (warnings discarded)."""
-    graph, _ = build_graph_with_warnings(records)
-    return graph
+    return build_graph_with_warnings(records).graph
 
 
 def upstream(graph: nx.DiGraph, col_id: str) -> list[LineageEdge]:

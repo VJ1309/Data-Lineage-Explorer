@@ -143,51 +143,25 @@ def refresh_source(source_id: str):
         raise HTTPException(status_code=404, detail="Source not found")
 
     entry = state.source_registry[source_id]
-    records = entry.records
+    result = build_graph_with_warnings(entry.records)
 
-    new_graph, new_warnings = build_graph_with_warnings(records)
-    new_raw_graph: nx.DiGraph = new_graph.graph.pop("_raw_graph", nx.DiGraph())
-
-    # Remove old contributions from this source before adding new ones
     _remove_source_files(entry.parsed_files)
-
-    state.lineage_graph = nx.compose(state.lineage_graph, new_graph)
-    state.raw_graph = nx.compose(state.raw_graph, new_raw_graph)
+    state.lineage_graph = nx.compose(state.lineage_graph, result.graph)
+    state.raw_graph = nx.compose(state.raw_graph, result.raw_graph)
     state.parse_warnings = [w for w in state.parse_warnings if w.get("source_id") != source_id]
     state.parse_warnings.extend(
         {"file": w.file, "error": w.error, "severity": w.severity, "source_id": source_id}
-        for w in new_warnings
+        for w in result.warnings
     )
 
-    # Track per-file stats for confidence rating
-    file_stats: dict[str, dict] = {}
-    for _, _, d in new_graph.edges(data=True):
-        if d.get("data") and d["data"].source_file:
-            fname = d["data"].source_file
-            if fname not in file_stats:
-                file_stats[fname] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
-            file_stats[fname]["edge_count"] += 1
-            if d["data"].confidence == "approximate":
-                file_stats[fname]["approximate_count"] += 1
-
-    error_files: set[str] = set()
-    for w in new_warnings:
-        if w.file:
-            if w.file not in file_stats:
-                file_stats[w.file] = {"edge_count": 0, "approximate_count": 0, "warning_count": 0}
-            file_stats[w.file]["warning_count"] += 1
-            if w.severity == "error":
-                error_files.add(w.file)
-
-    entry.parsed_files = set(file_stats.keys())
-    entry.file_stats = file_stats
-    entry.error_files = error_files
-
+    entry.parsed_files = set(result.file_stats.keys())
+    entry.file_stats = result.file_stats
+    entry.error_files = result.error_files
     entry.status = "parsed"
-    entry.file_count = len(records)
-    entry.warning_count = len(new_warnings)
+    entry.file_count = len(entry.records)
+    entry.warning_count = len(result.warnings)
 
-    return {"ok": True, "file_count": len(records), "edge_count": new_graph.number_of_edges()}
+    return {"ok": True, "file_count": len(entry.records), "edge_count": result.graph.number_of_edges()}
 
 
 # ── Tables / Columns ─────────────────────────────────────────────────────────
