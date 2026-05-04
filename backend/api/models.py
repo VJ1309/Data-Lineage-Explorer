@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from lineage.models import FileRecord
+from lineage.models import FileRecord, ParseWarning
 
 
 @dataclass
@@ -27,4 +27,24 @@ class SourceEntry:
             "status": self.status,
             "file_count": self.file_count,
             "warning_count": self.warning_count,
+        }
+
+
+@dataclass
+class StoredWarning:
+    """ParseWarning + the source_id that produced it.
+
+    Wraps the engine-layer ParseWarning so state.parse_warnings can be typed
+    without leaking source-id awareness into the parser models. /warnings
+    reshapes via to_public_dict() at the API boundary.
+    """
+    warning: ParseWarning
+    source_id: str
+
+    def to_public_dict(self) -> dict:
+        return {
+            "file": self.warning.file,
+            "error": self.warning.error,
+            "severity": self.warning.severity,
+            "source_id": self.source_id,
         }

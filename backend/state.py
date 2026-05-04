@@ -1,6 +1,6 @@
 """Module-level in-memory state. All state is lost on server restart."""
 import networkx as nx
-from api.models import SourceEntry
+from api.models import SourceEntry, StoredWarning
 
 # source_registry maps source_id -> SourceEntry
 source_registry: dict[str, SourceEntry] = {}
@@ -12,4 +12,4 @@ lineage_graph: nx.DiGraph = nx.DiGraph()
 raw_graph: nx.DiGraph = nx.DiGraph()
 
 # Parse warnings from the last refresh of each source
-parse_warnings: list[dict[str, str]] = []
+parse_warnings: list[StoredWarning] = []

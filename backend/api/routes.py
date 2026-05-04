@@ -10,7 +10,7 @@ from lineage.engine import trace_paths as engine_trace_paths
 from lineage.ids import split_column_id
 from lineage.models import ParseWarning
 from ingestion.upload import ingest_zip
-from api.models import SourceEntry
+from api.models import SourceEntry, StoredWarning
 import state
 
 router = APIRouter()
@@ -107,7 +107,7 @@ def delete_source(source_id: str):
     if entry:
         _remove_source_files(entry.parsed_files)
         state.parse_warnings = [
-            w for w in state.parse_warnings if w.get("source_id") != source_id
+            w for w in state.parse_warnings if w.source_id != source_id
         ]
     del state.source_registry[source_id]
     return {"ok": True}
@@ -148,10 +148,9 @@ def refresh_source(source_id: str):
     _remove_source_files(entry.parsed_files)
     state.lineage_graph = nx.compose(state.lineage_graph, result.graph)
     state.raw_graph = nx.compose(state.raw_graph, result.raw_graph)
-    state.parse_warnings = [w for w in state.parse_warnings if w.get("source_id") != source_id]
+    state.parse_warnings = [w for w in state.parse_warnings if w.source_id != source_id]
     state.parse_warnings.extend(
-        {"file": w.file, "error": w.error, "severity": w.severity, "source_id": source_id}
-        for w in result.warnings
+        StoredWarning(warning=w, source_id=source_id) for w in result.warnings
     )
 
     entry.parsed_files = set(result.file_stats.keys())
@@ -288,4 +287,4 @@ def search(q: str):
 
 @router.get("/warnings")
 def get_warnings():
-    return state.parse_warnings
+    return [w.to_public_dict() for w in state.parse_warnings]
