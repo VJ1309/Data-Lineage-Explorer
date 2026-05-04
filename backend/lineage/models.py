@@ -86,15 +86,6 @@ class ParseResult:
     raw_edges: list[LineageEdge] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    def __iter__(self):
-        return iter(self.edges)
-
-    def __len__(self):
-        return len(self.edges)
-
-    def __getitem__(self, key):
-        return self.edges[key]
-
 
 @dataclass
 class GraphResult:

@@ -30,7 +30,7 @@ df.write.saveAsTable("active_orders")
 
 
 def test_simple_select_passthrough():
-    edges = parse_pyspark(SIMPLE_SELECT, source_file="pipeline.py")
+    edges = parse_pyspark(SIMPLE_SELECT, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     assert "staging_orders.order_id" in targets
     assert "staging_orders.amount" in targets
@@ -39,14 +39,14 @@ def test_simple_select_passthrough():
 
 
 def test_withcolumn_expression():
-    edges = parse_pyspark(WITHCOLUMN, source_file="pipeline.py")
+    edges = parse_pyspark(WITHCOLUMN, source_file="pipeline.py").edges
     edge = next((e for e in edges if e.target_col == "enriched_orders.total"), None)
     assert edge is not None
     assert edge.transform_type in ("expression", "aggregation")
 
 
 def test_agg_sum():
-    edges = parse_pyspark(AGG, source_file="pipeline.py")
+    edges = parse_pyspark(AGG, source_file="pipeline.py").edges
     edge = next((e for e in edges if e.target_col == "agg_revenue.total_revenue"), None)
     assert edge is not None
     assert edge.transform_type == "aggregation"
@@ -54,18 +54,18 @@ def test_agg_sum():
 
 
 def test_chained_operations():
-    edges = parse_pyspark(CHAINED, source_file="pipeline.py")
+    edges = parse_pyspark(CHAINED, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     assert "active_orders.revenue" in targets
 
 
 def test_bad_python_raises_syntax_error():
     with pytest.raises(SyntaxError):
-        parse_pyspark("def (((broken:", source_file="bad.py")
+        parse_pyspark("def (((broken:", source_file="bad.py").edges
 
 
 def test_source_line_attached():
-    edges = parse_pyspark(AGG, source_file="pipeline.py")
+    edges = parse_pyspark(AGG, source_file="pipeline.py").edges
     for edge in edges:
         assert edge.source_line is not None
         assert edge.source_line > 0
@@ -97,7 +97,7 @@ result.write.saveAsTable("enriched_orders")
 
 
 def test_join_simple_key():
-    edges = parse_pyspark(JOIN_SIMPLE, source_file="pipeline.py")
+    edges = parse_pyspark(JOIN_SIMPLE, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     assert "enriched_orders.order_id" in targets
     assert "enriched_orders.customer_id" in targets
@@ -110,7 +110,7 @@ def test_join_simple_key():
 
 
 def test_join_list_keys():
-    edges = parse_pyspark(JOIN_LIST_KEYS, source_file="pipeline.py")
+    edges = parse_pyspark(JOIN_LIST_KEYS, source_file="pipeline.py").edges
     jk_edges = [e for e in edges if e.transform_type == "join_key"]
     jk_target_cols = {e.target_col.split(".")[-1] for e in jk_edges}
     assert "customer_id" in jk_target_cols
@@ -118,7 +118,7 @@ def test_join_list_keys():
 
 
 def test_join_on_keyword():
-    edges = parse_pyspark(JOIN_ON_KEYWORD, source_file="pipeline.py")
+    edges = parse_pyspark(JOIN_ON_KEYWORD, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     assert "enriched_orders.order_id" in targets
     assert "enriched_orders.customer_name" in targets
@@ -155,14 +155,14 @@ df.write.saveAsTable("staging_orders")
 
 
 def test_spark_sql_create_view():
-    edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_CREATE_VIEW, source_file="pipeline.py").edges
     # A standalone temp view with no downstream consumer produces no lineage edges
     # after resolution (temp view edges are internal/intermediate).
     assert len(edges) == 0
 
 
 def test_spark_sql_insert():
-    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py").edges
     assert len(edges) >= 2
     targets = {e.target_col for e in edges}
     assert "agg_orders.customer_id" in targets
@@ -173,14 +173,14 @@ def test_spark_sql_insert():
 
 def test_spark_sql_assign():
     """df = spark.sql('SELECT ...') should emit edges from the SQL."""
-    edges = parse_pyspark(SPARK_SQL_ASSIGN, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_ASSIGN, source_file="pipeline.py").edges
     # The spark.sql() SELECT produces edges with target "result"
     sql_edges = [e for e in edges if "result." in e.target_col or "raw_orders." in e.source_col]
     assert len(sql_edges) >= 2
 
 
 def test_spark_sql_source_line():
-    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_INSERT, source_file="pipeline.py").edges
     assert len(edges) > 0, "expected edges from spark.sql INSERT"
     for edge in edges:
         assert edge.source_line is not None
@@ -229,7 +229,7 @@ DATABRICKS_NOTEBOOK_MIXED_MAGIC = '''# Databricks notebook source
 
 
 def test_databricks_notebook_sql_cells():
-    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py").edges
     targets = {e.target_col for e in edges}
     # stg_orders is a temp view — its edges should be resolved through
     assert "stg_orders.order_id" not in targets
@@ -242,14 +242,14 @@ def test_databricks_notebook_sql_cells():
 
 
 def test_databricks_notebook_pyspark_cell():
-    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py").edges
     targets = {e.target_col for e in edges}
     assert "final_output.id" in targets
     assert "final_output.value" in targets
 
 
 def test_databricks_notebook_cell_index():
-    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py")
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK, source_file="nb.py").edges
     # stg_orders is a temp view, so its edges are resolved through.
     # SQL cell 2 (INSERT INTO) should be cell_idx 2
     agg_edges = [e for e in edges if "agg_revenue" in e.target_col]
@@ -260,7 +260,7 @@ def test_databricks_notebook_cell_index():
 
 
 def test_databricks_notebook_skips_markdown():
-    edges = parse_pyspark(DATABRICKS_NOTEBOOK_MIXED_MAGIC, source_file="nb.py")
+    edges = parse_pyspark(DATABRICKS_NOTEBOOK_MIXED_MAGIC, source_file="nb.py").edges
     # Only the %sql cell should produce edges
     targets = {e.target_col for e in edges}
     assert "result.col_a" in targets
@@ -283,7 +283,7 @@ spark.sql("INSERT INTO final SELECT id, val FROM staging")
 
 def test_plain_py_spark_sql_cross_call_temp_view():
     """Temp view created in one spark.sql() call must be resolved in a later call."""
-    edges = parse_pyspark(SPARK_SQL_CROSS_CALL_TEMP_VIEW, source_file="pipeline.py")
+    edges = parse_pyspark(SPARK_SQL_CROSS_CALL_TEMP_VIEW, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     assert "staging.id" not in targets, "temp view must not appear as a target"
@@ -302,7 +302,7 @@ df2.write.mode("overwrite").saveAsTable("staging_orders")
 
 def test_write_mode_chain_emits_edges():
     """df.write.mode(...).saveAsTable() must emit the same edges as df.write.saveAsTable()."""
-    edges = parse_pyspark(WRITE_MODE_CHAIN, source_file="pipeline.py")
+    edges = parse_pyspark(WRITE_MODE_CHAIN, source_file="pipeline.py").edges
     targets = {e.target_col for e in edges}
     assert "staging_orders.order_id" in targets, "write chain with .mode() dropped edges"
     assert "staging_orders.amount" in targets

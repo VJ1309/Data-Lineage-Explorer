@@ -17,13 +17,13 @@ def _parse_sql_notebook(sql: str, source_file: str = "nb.sql") -> list:
         all_edges.extend(parse_sql(
             cell_sql, source_file=source_file, source_line=None,
             source_cell=cell_idx, _resolve_views=False,
-        ))
+        ).edges)
     return resolve_temp_views(all_edges, temp_views)
 
 
 def test_simple_select_passthrough():
     sql = "SELECT order_id, amount FROM raw_orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     assert "raw_orders.order_id" not in targets  # source table columns don't get edges
     # passthrough: output col linked to input col
@@ -34,7 +34,7 @@ def test_simple_select_passthrough():
 
 def test_aggregation_sum():
     sql = "SELECT customer_id, SUM(amount) AS total_revenue FROM raw_orders GROUP BY customer_id"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     agg_edge = next(e for e in edges if e.target_col == "result.total_revenue")
     assert agg_edge.source_col == "raw_orders.amount"
     assert agg_edge.transform_type == "aggregation"
@@ -48,7 +48,7 @@ def test_cte_resolution():
     )
     SELECT order_id, amount FROM base
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     # Final output should trace back to raw_orders, not the CTE alias
     sources = {e.source_col for e in edges}
     assert any("raw_orders" in s for s in sources)
@@ -56,14 +56,14 @@ def test_cte_resolution():
 
 def test_cast_transform():
     sql = "SELECT CAST(amount AS STRING) AS amount_str FROM raw_orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     cast_edge = next(e for e in edges if e.target_col == "result.amount_str")
     assert cast_edge.transform_type == "cast"
 
 
 def test_window_function():
     sql = "SELECT customer_id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn FROM raw_orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     win_edge = next((e for e in edges if e.target_col == "result.rn"), None)
     assert win_edge is not None
     assert win_edge.transform_type == "window"
@@ -83,7 +83,7 @@ def test_multi_statement_sql():
     INSERT INTO agg_revenue
     SELECT customer_id, SUM(amount) AS total FROM staging_orders GROUP BY customer_id;
     """
-    edges = parse_sql(sql, source_file="multi.sql", source_line=1)
+    edges = parse_sql(sql, source_file="multi.sql", source_line=1).edges
     # Should have edges for both statements
     targets = {e.target_col for e in edges}
     assert "staging_orders.order_id" in targets
@@ -98,7 +98,7 @@ def test_multi_statement_sql():
 
 def test_schema_qualified_target():
     sql = "INSERT INTO analytics.revenue_summary SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     assert "analytics.revenue_summary.total" in targets
     assert "analytics.revenue_summary.customer_id" in targets
@@ -106,7 +106,7 @@ def test_schema_qualified_target():
 
 def test_schema_qualified_source():
     sql = "SELECT o.order_id, o.amount FROM staging.raw_orders o"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     assert "staging.raw_orders.order_id" in sources
     assert "staging.raw_orders.amount" in sources
@@ -119,7 +119,7 @@ def test_schema_qualified_join():
     FROM staging.orders o
     JOIN staging.customers c ON o.customer_id = c.customer_id
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     assert "analytics.mart_orders.order_id" in targets
@@ -130,7 +130,7 @@ def test_schema_qualified_join():
 
 def test_multi_statement_with_empty_statements():
     sql = "SELECT a FROM t1; ; SELECT b FROM t2;"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     assert "result.a" in targets
     assert "result.b" in targets
@@ -138,7 +138,7 @@ def test_multi_statement_with_empty_statements():
 
 def test_catalog_schema_table():
     sql = "SELECT col1 FROM my_catalog.my_schema.my_table"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     assert "my_catalog.my_schema.my_table.col1" in sources
 
@@ -204,7 +204,7 @@ def test_temp_view_resolution():
     INSERT INTO final_output
     SELECT order_id, amount FROM staging;
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     # Temp view edges should be resolved away
@@ -255,7 +255,7 @@ def test_struct_field_access_no_phantom_table():
     SELECT info.city AS city, score
     FROM customers
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     # 'info' is a struct column on customers — must NOT appear as a table
     assert not any(s.startswith("info.") for s in sources), (
@@ -282,7 +282,7 @@ def test_multi_table_cte_no_phantom_table():
     INSERT INTO final_table
     SELECT id, val FROM joined
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     # 'joined' must NOT appear as a phantom table
@@ -309,7 +309,7 @@ def test_multi_table_cte_correct_source_attribution():
     INSERT INTO final_table
     SELECT id, val FROM joined
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "table_a.id" in sources, f"Expected table_a.id in sources: {sources}"
@@ -329,7 +329,7 @@ def test_struct_field_fallback_is_approximate():
     SELECT info.city AS city, score
     FROM customers
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     city_edges = [e for e in edges if e.target_col.endswith(".city")]
     assert len(city_edges) == 1
     assert city_edges[0].confidence == "approximate", (
@@ -346,7 +346,7 @@ def test_struct_field_fallback_is_approximate():
 def test_certain_table_alias_is_certain():
     """Column resolved via a known alias must produce a certain edge."""
     sql = "SELECT o.order_id FROM staging.orders o"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert len(edges) == 1
     assert edges[0].confidence == "certain"
 
@@ -354,7 +354,7 @@ def test_certain_table_alias_is_certain():
 def test_certain_no_qualifier_is_certain():
     """Column with no table qualifier (default_table path) must be certain."""
     sql = "SELECT amount FROM raw_orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert len(edges) == 1
     assert edges[0].confidence == "certain"
 
@@ -366,7 +366,7 @@ def test_chained_ctes_resolve_to_source():
          cte2 AS (SELECT id, val FROM cte1)
     INSERT INTO final SELECT id, val FROM cte2
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     assert any("source_table" in s for s in sources), "must trace back to source_table"
     assert not any(s.startswith("cte1.") for s in sources), "cte1 must be resolved away"
@@ -380,7 +380,7 @@ def test_create_table_as_with_cte():
     WITH base AS (SELECT col_a, col_b FROM source_table)
     SELECT col_a, col_b FROM base
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "output_table.col_a" in targets
@@ -399,7 +399,7 @@ def test_create_temp_view_as_with_cte_consumer():
 
     INSERT INTO summary SELECT id, amount FROM staging
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "summary.id" in targets
@@ -416,7 +416,7 @@ def test_union_all_both_branches_produce_edges():
     UNION ALL
     SELECT id, val FROM table_b
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "table_a.id" in sources, "first UNION branch missing"
@@ -427,7 +427,7 @@ def test_union_all_both_branches_produce_edges():
 def test_union_standalone_result():
     """UNION without INSERT uses 'result' as synthetic target."""
     sql = "SELECT a FROM t1 UNION ALL SELECT a FROM t2"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "t1.a" in sources
@@ -441,7 +441,7 @@ def test_subquery_in_from_traces_to_base_table():
     INSERT INTO result
     SELECT id, val FROM (SELECT id, val FROM source_table) sub
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "source_table.id" in sources, "must trace through subquery to base table"
@@ -460,7 +460,7 @@ def test_subquery_with_alias_join():
     JOIN (SELECT id, SUM(val) AS metric FROM detail_table GROUP BY id) sub
       ON a.id = sub.id
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     assert "base_table.id" in sources
     assert "detail_table.val" in sources
@@ -473,7 +473,7 @@ def test_subquery_with_inner_join_no_leak():
     SELECT sub.y
     FROM (SELECT a.x, b.y FROM t1 a JOIN t2 b ON a.id = b.id) sub
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     # sub alias should be resolved away — real sources trace directly to result
@@ -501,7 +501,7 @@ def test_subquery_alias_not_in_graph_nodes():
 def test_select_star_emits_wildcard_edge():
     """SELECT * must emit a source.* -> target.* wildcard edge, not silence."""
     sql = "INSERT INTO target SELECT * FROM source_table"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert len(edges) == 1
     assert edges[0].source_col == "source_table.*"
     assert edges[0].target_col == "target.*"
@@ -519,7 +519,7 @@ def test_temp_view_wildcard_named_chain():
 
     INSERT INTO final_table SELECT col_x, col_y FROM view_a
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "final_table.col_x" in targets
@@ -537,7 +537,7 @@ def test_temp_view_wildcard_chain_two_hops():
     CREATE OR REPLACE TEMPORARY VIEW view_b AS SELECT * FROM view_a;
     INSERT INTO final_table SELECT * FROM view_b
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "final_table.*" in targets
@@ -554,7 +554,7 @@ def test_merge_into_matched_update_emits_edges():
     ON t.id = s.id
     WHEN MATCHED THEN UPDATE SET t.val = s.val, t.status = s.status
     """
-    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     assert "target_table.val" in targets, f"MERGE UPDATE target missing; targets={targets}"
@@ -571,7 +571,7 @@ def test_merge_into_not_matched_insert_emits_edges():
     ON t.id = s.id
     WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
     """
-    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     assert "target_table.id" in targets
@@ -600,7 +600,7 @@ def test_unqualified_column_in_join_is_marked_unqualified():
     INSERT INTO result
     SELECT id FROM table_a JOIN table_b ON table_a.id = table_b.id
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     result_edges = [e for e in edges if e.target_col == "result.id"]
     assert result_edges, "should emit at least one edge for result.id"
     assert all(e.qualified is False for e in result_edges), (
@@ -614,7 +614,7 @@ def test_qualified_column_in_join_stays_qualified():
     INSERT INTO result
     SELECT table_a.id FROM table_a JOIN table_b ON table_a.id = table_b.id
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.id")
     assert e.qualified is True
 
@@ -622,7 +622,7 @@ def test_qualified_column_in_join_stays_qualified():
 def test_single_source_unqualified_column_stays_qualified():
     """Unqualified column against a single FROM is unambiguous — keep qualified=True."""
     sql = "INSERT INTO result SELECT id FROM only_table"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.id")
     assert e.qualified is True
 
@@ -635,7 +635,7 @@ def test_lateral_view_explode_links_output_to_source_array():
     FROM orders t
     LATERAL VIEW EXPLODE(t.items) e AS item
     """
-    edges = parse_sql(sql, source_file="l.sql", source_line=1)
+    edges = parse_sql(sql, source_file="l.sql", source_line=1).edges
     item_edges = [e for e in edges if e.target_col == "result.item"]
     assert item_edges, f"no edge for result.item; edges={[(e.source_col, e.target_col) for e in edges]}"
     sources = {e.source_col for e in item_edges}
@@ -652,7 +652,7 @@ def test_lateral_view_posexplode_links_both_columns():
     FROM orders t
     LATERAL VIEW POSEXPLODE(t.items) e AS pos, val
     """
-    edges = parse_sql(sql, source_file="l.sql", source_line=1)
+    edges = parse_sql(sql, source_file="l.sql", source_line=1).edges
     val_sources = {e.source_col for e in edges if e.target_col == "result.val"}
     assert "orders.items" in val_sources, (
         f"posexplode val must trace to orders.items; got {val_sources}"
@@ -666,7 +666,7 @@ def test_pivot_output_columns_trace_to_aggregated_source():
     SELECT cat_a, cat_b FROM (SELECT year, amount, category FROM sales) p
     PIVOT (SUM(amount) FOR category IN ('A' AS cat_a, 'B' AS cat_b))
     """
-    edges = parse_sql(sql, source_file="p.sql", source_line=1)
+    edges = parse_sql(sql, source_file="p.sql", source_line=1).edges
     cat_a_sources = {e.source_col for e in edges if e.target_col == "result.cat_a"}
     cat_b_sources = {e.source_col for e in edges if e.target_col == "result.cat_b"}
     assert "sales.amount" in cat_a_sources, (
@@ -683,7 +683,7 @@ def test_where_clause_emits_filter_edges():
     INSERT INTO result
     SELECT id FROM users WHERE active = 1 AND region = 'US'
     """
-    edges = parse_sql(sql, source_file="w.sql", source_line=1)
+    edges = parse_sql(sql, source_file="w.sql", source_line=1).edges
     filter_edges = [e for e in edges if e.target_col == "result.__filter__"]
     assert filter_edges, f"no filter edges emitted; edges={[(e.source_col, e.target_col, e.transform_type) for e in edges]}"
     sources = {e.source_col for e in filter_edges}
@@ -696,7 +696,7 @@ def test_where_clause_emits_filter_edges():
 def test_where_clause_without_columns_emits_no_filter_edge():
     """WHERE 1 = 1 (no column refs) must not emit phantom filter edges."""
     sql = "INSERT INTO result SELECT id FROM users WHERE 1 = 1"
-    edges = parse_sql(sql, source_file="w.sql", source_line=1)
+    edges = parse_sql(sql, source_file="w.sql", source_line=1).edges
     assert not any(e.target_col == "result.__filter__" for e in edges)
 
 
@@ -719,7 +719,7 @@ def test_lookup_wildcard_no_cross_column_edges():
 
     INSERT INTO final_table SELECT col_a, col_b FROM wrapper_v
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
 
     col_a_sources = {e.source_col for e in edges if e.target_col == "final_table.col_a"}
     col_b_sources = {e.source_col for e in edges if e.target_col == "final_table.col_b"}
@@ -751,7 +751,7 @@ def test_expression_inherited_through_passthrough_view():
 
     INSERT INTO final_table SELECT col_a FROM tv1
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     resolved = [e for e in edges if e.target_col == "final_table.col_a"]
     assert resolved, f"no edge for final_table.col_a; all edges: {[(e.source_col, e.target_col) for e in edges]}"
     best = resolved[0]
@@ -771,7 +771,7 @@ def test_all_passthrough_chain_preserves_consumer_expression():
 
     INSERT INTO final_table SELECT col_a FROM tv1
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     resolved = [e for e in edges if e.target_col == "final_table.col_a"]
     assert resolved
     assert resolved[0].transform_type == "passthrough", (
@@ -787,7 +787,7 @@ def test_aggregation_inherited_through_passthrough_view():
 
     INSERT INTO final_table SELECT customer_id, total FROM agg_v
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     total_edges = [e for e in edges if e.target_col == "final_table.total"]
     assert total_edges, f"no edge for final_table.total; edges={[(e.source_col, e.target_col) for e in edges]}"
     assert total_edges[0].transform_type == "aggregation", (
@@ -804,7 +804,7 @@ def test_window_beats_aggregation_in_chain():
 
     INSERT INTO final_table SELECT rn FROM window_v
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     rn_edges = [e for e in edges if e.target_col == "final_table.rn"]
     assert rn_edges, f"no edge for final_table.rn; edges={[(e.source_col, e.target_col) for e in edges]}"
     assert rn_edges[0].transform_type == "window", (
@@ -820,7 +820,7 @@ def test_consumer_expression_beats_passthrough_intermediate():
 
     INSERT INTO final_table SELECT COALESCE(col_a, 0) AS col_a FROM tv1
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     resolved = [e for e in edges if e.target_col == "final_table.col_a"]
     assert resolved
     assert resolved[0].transform_type == "expression", (
@@ -831,7 +831,7 @@ def test_consumer_expression_beats_passthrough_intermediate():
 def test_non_tempview_edge_expression_unchanged():
     """Edges where source_col is a real base table are emitted with their original expression."""
     sql = "INSERT INTO final_table SELECT COALESCE(col_a, 0) AS col_a FROM base_table"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert len(edges) == 1
     assert edges[0].transform_type == "expression"
     assert edges[0].expression and "COALESCE" in edges[0].expression.upper()
@@ -843,7 +843,7 @@ def test_join_on_emits_joinkey_edges():
     INSERT INTO result
     SELECT t.val FROM t JOIN s ON t.id = s.id
     """
-    edges = parse_sql(sql, source_file="j.sql", source_line=1)
+    edges = parse_sql(sql, source_file="j.sql", source_line=1).edges
     jk_edges = [e for e in edges if e.target_col == "result.__joinkey__"]
     assert jk_edges, f"no join_key edges; edges={[(e.source_col, e.target_col) for e in edges]}"
     sources = {e.source_col for e in jk_edges}
@@ -856,7 +856,7 @@ def test_join_on_emits_joinkey_edges():
 def test_join_without_on_clause_emits_no_joinkey():
     """CROSS JOIN has no ON — must not emit phantom joinkey edges."""
     sql = "INSERT INTO result SELECT t.val FROM t CROSS JOIN s"
-    edges = parse_sql(sql, source_file="j.sql", source_line=1)
+    edges = parse_sql(sql, source_file="j.sql", source_line=1).edges
     assert not any(e.target_col == "result.__joinkey__" for e in edges)
 
 
@@ -875,7 +875,7 @@ def test_cte_with_union_all_resolves_to_real_sources():
     INSERT INTO uc_dc_dev.sc_wrk.target_tbl
     SELECT id, val FROM na_pos_non_calc
     """
-    edges = parse_sql(sql, source_file="test_union.sql", source_line=1)
+    edges = parse_sql(sql, source_file="test_union.sql", source_line=1).edges
     source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
     assert "na_pos_non_calc" not in source_tables, (
         f"na_pos_non_calc leaked as phantom; edges: {edges}"
@@ -939,7 +939,7 @@ def test_null_literal_in_union_all_branch_does_not_create_phantom_source():
     INSERT INTO uc_dc_dev.sc_wrk.target_tbl
     SELECT po_num, NULL AS extra_col FROM data_cte
     """
-    edges = parse_sql(sql, source_file="test_null_literal.sql", source_line=1)
+    edges = parse_sql(sql, source_file="test_null_literal.sql", source_line=1).edges
     source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
     # data_cte must not appear as source (it's a CTE, not a real table)
     assert "data_cte" not in source_tables, (
@@ -965,7 +965,7 @@ def test_string_literal_in_union_all_branch_does_not_create_phantom_source():
     INSERT INTO uc_dc_dev.sc_wrk.target_tbl
     SELECT id, 'CAP' AS src_sys_cd FROM so_po_data
     """
-    edges = parse_sql(sql, source_file="test_string_literal.sql", source_line=1)
+    edges = parse_sql(sql, source_file="test_string_literal.sql", source_line=1).edges
     source_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
     assert "so_po_data" not in source_tables, (
         f"so_po_data leaked as phantom source via string literal 'CAP'; edges: {edges}"
@@ -1055,7 +1055,7 @@ def test_temp_view_uppercase_wildcard_select_in_databricks_notebook():
 def test_approx_count_distinct_is_aggregation():
     """APPROX_COUNT_DISTINCT must be classified as aggregation, not expression."""
     sql = "SELECT APPROX_COUNT_DISTINCT(user_id) AS approx_users FROM events"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.approx_users")
     assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
 
@@ -1063,7 +1063,7 @@ def test_approx_count_distinct_is_aggregation():
 def test_stddev_is_aggregation():
     """STDDEV must be classified as aggregation."""
     sql = "SELECT STDDEV(amount) AS std_amount FROM orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.std_amount")
     assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
 
@@ -1071,7 +1071,7 @@ def test_stddev_is_aggregation():
 def test_variance_is_aggregation():
     """VARIANCE must be classified as aggregation."""
     sql = "SELECT VARIANCE(score) AS var_score FROM results"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.var_score")
     assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
 
@@ -1079,7 +1079,7 @@ def test_variance_is_aggregation():
 def test_percentile_approx_is_aggregation():
     """PERCENTILE_APPROX must be classified as aggregation."""
     sql = "SELECT PERCENTILE_APPROX(amount, 0.5) AS median FROM orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     e = next(e for e in edges if e.target_col == "result.median")
     assert e.transform_type == "aggregation", f"expected aggregation, got {e.transform_type!r}"
 
@@ -1089,7 +1089,7 @@ def test_percentile_approx_is_aggregation():
 def test_double_quoted_column_resolved_as_identifier():
     """Double-quoted column names must produce correct lineage, not be silently dropped."""
     sql = 'SELECT "order_id", "amount" FROM raw_orders'
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     assert "raw_orders.order_id" in sources, f"double-quoted column not resolved: {sources}"
     assert "raw_orders.amount" in sources
@@ -1098,7 +1098,7 @@ def test_double_quoted_column_resolved_as_identifier():
 def test_double_quoted_target_in_insert():
     """Double-quoted table in INSERT INTO must resolve to correct target."""
     sql = 'INSERT INTO "my_schema"."my_table" SELECT id FROM source_tbl'
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     targets = {e.target_col for e in edges}
     assert any("my_table" in t for t in targets), f"quoted target table not resolved: {targets}"
 
@@ -1113,7 +1113,7 @@ def test_qualify_emits_qualify_filter_edge():
     FROM events
     QUALIFY rn = 1
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     qualify_edges = [e for e in edges if e.target_col == "result.__qualify__"]
     assert qualify_edges, f"no __qualify__ edges emitted; edges={[(e.source_col, e.target_col) for e in edges]}"
     for e in qualify_edges:
@@ -1127,7 +1127,7 @@ def test_qualify_sources_correct_column():
     FROM events
     QUALIFY rn = 1
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     qualify_sources = {e.source_col for e in edges if e.target_col == "result.__qualify__"}
     assert any("rn" in s for s in qualify_sources), (
         f"QUALIFY predicate column 'rn' not in sources: {qualify_sources}"
@@ -1137,7 +1137,7 @@ def test_qualify_sources_correct_column():
 def test_qualify_without_columns_emits_no_qualify_edge():
     """QUALIFY 1 = 1 (no column refs) must not emit phantom qualify edges."""
     sql = "SELECT id FROM t QUALIFY 1 = 1"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert not any(e.target_col == "result.__qualify__" for e in edges)
 
 
@@ -1152,7 +1152,7 @@ def test_having_emits_having_filter_edge():
     GROUP BY customer_id
     HAVING SUM(amount) > 1000
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     having_edges = [e for e in edges if e.target_col == "result.__having__"]
     assert having_edges, f"no __having__ edges emitted; edges={[(e.source_col, e.target_col) for e in edges]}"
     for e in having_edges:
@@ -1164,7 +1164,7 @@ def test_having_emits_having_filter_edge():
 def test_having_without_columns_emits_no_having_edge():
     """HAVING 1 = 1 (no column refs) must not emit phantom having edges."""
     sql = "SELECT id FROM t GROUP BY id HAVING 1 = 1"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert not any(e.target_col == "result.__having__" for e in edges)
 
 
@@ -1178,7 +1178,7 @@ def test_merge_using_subquery_traces_source_columns():
     ON t.id = s.id
     WHEN MATCHED THEN UPDATE SET t.val = s.val
     """
-    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "target_table.val" in targets, f"MERGE UPDATE target missing; targets={targets}"
@@ -1199,7 +1199,7 @@ def test_merge_using_subquery_with_not_matched_insert():
     ON t.id = s.id
     WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)
     """
-    edges = parse_sql(sql, source_file="m.sql", source_line=1)
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
     sources = {e.source_col for e in edges}
     targets = {e.target_col for e in edges}
     assert "target_table.id" in targets
@@ -1214,7 +1214,7 @@ def test_merge_using_subquery_with_not_matched_insert():
 def test_copy_into_emits_approximate_wildcard_edge():
     """COPY INTO target FROM 'path' must emit __file__.* → target.* approximate edge."""
     sql = "COPY INTO my_catalog.my_schema.my_table FROM '/mnt/data/orders/'"
-    edges = parse_sql(sql, source_file="load.sql", source_line=1)
+    edges = parse_sql(sql, source_file="load.sql", source_line=1).edges
     assert edges, "COPY INTO must emit at least one edge"
     e = edges[0]
     assert e.source_col == "__file__.*", f"expected __file__.*, got {e.source_col!r}"
@@ -1226,7 +1226,7 @@ def test_copy_into_emits_approximate_wildcard_edge():
 def test_copy_into_unqualified_table():
     """COPY INTO without catalog/schema must still emit an edge to the table."""
     sql = "COPY INTO orders FROM '/mnt/landing/'"
-    edges = parse_sql(sql, source_file="load.sql", source_line=1)
+    edges = parse_sql(sql, source_file="load.sql", source_line=1).edges
     assert any("orders" in e.target_col for e in edges), (
         f"COPY INTO target 'orders' not in edges: {[(e.source_col, e.target_col) for e in edges]}"
     )
@@ -1237,7 +1237,7 @@ def test_copy_into_unqualified_table():
 def test_clone_table_emits_approximate_passthrough_edge():
     """CREATE TABLE new_tbl CLONE src_tbl must emit src.* → new.* approximate edge."""
     sql = "CREATE TABLE my_catalog.schema.new_table CLONE my_catalog.schema.source_table"
-    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1).edges
     assert edges, "CLONE must emit at least one edge"
     e = edges[0]
     assert "source_table" in e.source_col, f"clone source missing; got {e.source_col!r}"
@@ -1249,7 +1249,7 @@ def test_clone_table_emits_approximate_passthrough_edge():
 def test_deep_clone_emits_edge():
     """CREATE TABLE t DEEP CLONE src must also emit a lineage edge."""
     sql = "CREATE TABLE new_tbl DEEP CLONE src_tbl"
-    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1).edges
     assert any("src_tbl" in e.source_col for e in edges), (
         f"DEEP CLONE source 'src_tbl' not in edges: {[(e.source_col, e.target_col) for e in edges]}"
     )
@@ -1260,7 +1260,7 @@ def test_deep_clone_emits_edge():
 def test_passthrough_expression_is_full_select_body():
     """Passthrough edge expression must be the full SELECT body, not the column ref."""
     sql = "INSERT INTO tgt SELECT a, b FROM src"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges"
     for e in pt:
@@ -1275,7 +1275,7 @@ def test_passthrough_expression_is_full_select_body():
 def test_passthrough_expression_shows_renamed_column():
     """Renamed passthrough column (AS alias) must be visible in the full SELECT expression."""
     sql = "SELECT customer_id AS client_id FROM raw.orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges"
     expr = pt[0].expression
@@ -1286,7 +1286,7 @@ def test_passthrough_expression_shows_renamed_column():
 def test_passthrough_expression_single_cte():
     """Single CTE: passthrough expression contains full WITH ... SELECT."""
     sql = "WITH base AS (SELECT x FROM t) SELECT x FROM base"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     # Edges from the outer SELECT (resolving through the CTE) are the passthrough ones
     pt = [e for e in edges if e.transform_type == "passthrough" and "t." in e.source_col]
     assert pt, f"expected passthrough from 't'; edges={[(e.source_col,e.target_col,e.transform_type) for e in edges]}"
@@ -1303,7 +1303,7 @@ def test_passthrough_expression_multi_cte():
          enriched AS (SELECT x FROM base JOIN t2 ON base.x = t2.x)
     SELECT x FROM enriched
     """
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges"
     exprs = [e.expression for e in pt if e.expression]
@@ -1318,7 +1318,7 @@ def test_passthrough_expression_multi_cte():
 def test_passthrough_expression_preserves_where():
     """WHERE clause must be preserved in the passthrough expression."""
     sql = "SELECT customer_id FROM orders WHERE status = 'active'"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges"
     expr = pt[0].expression
@@ -1330,7 +1330,7 @@ def test_passthrough_expression_preserves_where():
 def test_passthrough_expression_preserves_join():
     """JOIN clause must be preserved in the passthrough expression."""
     sql = "SELECT a.col FROM a JOIN b ON a.id = b.id"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges"
     expr = pt[0].expression
@@ -1341,7 +1341,7 @@ def test_passthrough_expression_preserves_join():
 def test_aggregation_expression_not_overridden():
     """Aggregation edges must keep per-column expression, not the full SELECT."""
     sql = "SELECT SUM(amount) AS total FROM orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     agg = [e for e in edges if e.transform_type == "aggregation"]
     assert agg, "expected aggregation edge"
     expr = agg[0].expression
@@ -1354,7 +1354,7 @@ def test_aggregation_expression_not_overridden():
 def test_expression_transform_not_overridden():
     """Arithmetic expression edges must keep per-column expression, not the full SELECT."""
     sql = "SELECT amount * 1.1 AS adjusted FROM orders"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     expr_edges = [e for e in edges if e.transform_type == "expression"]
     assert expr_edges, "expected expression-type edge"
     expr = expr_edges[0].expression
@@ -1366,7 +1366,7 @@ def test_expression_transform_not_overridden():
 def test_clone_passthrough_expression_unchanged():
     """CLONE (approximate passthrough) expression must NOT be the full SELECT body."""
     sql = "CREATE TABLE new_tbl CLONE src_tbl"
-    edges = parse_sql(sql, source_file="clone.sql", source_line=1)
+    edges = parse_sql(sql, source_file="clone.sql", source_line=1).edges
     assert edges, "CLONE must emit at least one edge"
     e = edges[0]
     assert e.confidence == "approximate"
@@ -1381,7 +1381,7 @@ def test_clone_passthrough_expression_unchanged():
 def test_passthrough_expression_select_star():
     """SELECT * passthrough must produce a full SELECT expression containing *."""
     sql = "SELECT * FROM tbl"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     # SELECT * produces wildcard edges — their expression comes from _wildcard_edge, unchanged
     for e in pt:
@@ -1395,7 +1395,7 @@ def test_passthrough_expression_select_star():
 def test_ctas_passthrough_expression_is_inner_select():
     """CREATE TABLE AS SELECT passthrough expression must be the inner SELECT body."""
     sql = "CREATE TABLE tgt AS SELECT a, b FROM src"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     pt = [e for e in edges if e.transform_type == "passthrough"]
     assert pt, "expected passthrough edges from CTAS"
     for e in pt:
@@ -1411,7 +1411,7 @@ def test_ctas_passthrough_expression_is_inner_select():
 def test_read_files_in_from_emits_synthetic_source():
     """SELECT from read_files() must register a synthetic source and emit edges."""
     sql = "SELECT id, name FROM read_files('/mnt/landing/orders/*.parquet', format => 'parquet') AS t"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert edges, "read_files() query must emit edges"
     sources = {e.source_col.rsplit(".", 1)[0] for e in edges}
     # The synthetic source must not be empty and must not be the raw function call string
@@ -1423,7 +1423,7 @@ def test_read_files_in_from_emits_synthetic_source():
 def test_cloud_files_in_from_emits_synthetic_source():
     """SELECT from cloud_files() must register a synthetic source and emit edges."""
     sql = "INSERT INTO result SELECT id, val FROM cloud_files('/mnt/data/', 'parquet') AS f"
-    edges = parse_sql(sql, source_file="q.sql", source_line=1)
+    edges = parse_sql(sql, source_file="q.sql", source_line=1).edges
     assert edges, "cloud_files() query must emit edges"
     targets = {e.target_col for e in edges}
     assert any("result" in t for t in targets), f"result table missing in targets: {targets}"

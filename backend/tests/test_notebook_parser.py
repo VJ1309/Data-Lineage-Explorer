@@ -30,7 +30,7 @@ def test_sql_magic_cell_produces_edges():
     nb = _make_notebook([
         _code_cell("%sql SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id"),
     ])
-    edges = parse_notebook(nb, source_file="nb.ipynb")
+    edges = parse_notebook(nb, source_file="nb.ipynb").edges
     assert len(edges) > 0
     agg = next((e for e in edges if e.transform_type == "aggregation"), None)
     assert agg is not None
@@ -44,7 +44,7 @@ def test_pyspark_cell_produces_edges():
             'df2.write.saveAsTable("staging")\n'
         ),
     ])
-    edges = parse_notebook(nb, source_file="nb.ipynb")
+    edges = parse_notebook(nb, source_file="nb.ipynb").edges
     assert any(e.target_col == "staging.order_id" for e in edges)
 
 
@@ -53,7 +53,7 @@ def test_cell_index_attached():
         _code_cell("x = 1"),  # cell 0 — no lineage
         _code_cell("%sql SELECT amount FROM raw_orders"),  # cell 1
     ])
-    edges = parse_notebook(nb, source_file="nb.ipynb")
+    edges = parse_notebook(nb, source_file="nb.ipynb").edges
     for e in edges:
         assert e.source_cell == 1
 
@@ -63,7 +63,7 @@ def test_markdown_cells_skipped():
         {"cell_type": "markdown", "source": "# Title", "metadata": {}},
         _code_cell("%sql SELECT amount FROM raw_orders"),
     ])
-    edges = parse_notebook(nb, source_file="nb.ipynb")
+    edges = parse_notebook(nb, source_file="nb.ipynb").edges
     assert len(edges) > 0  # markdown didn't crash anything
 
 
@@ -79,7 +79,7 @@ def test_cross_cell_temp_view_resolution():
         _code_cell("%sql\nCREATE OR REPLACE TEMP VIEW stg AS SELECT id, val FROM source_table"),
         _code_cell("%sql\nINSERT INTO final SELECT id, val FROM stg"),
     ])
-    edges = parse_notebook(nb, source_file="nb.ipynb")
+    edges = parse_notebook(nb, source_file="nb.ipynb").edges
     targets = {e.target_col for e in edges}
     sources = {e.source_col for e in edges}
     assert "stg.id" not in targets, "temp view must not appear as a target"
