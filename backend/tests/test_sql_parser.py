@@ -1427,3 +1427,213 @@ def test_cloud_files_in_from_emits_synthetic_source():
     assert edges, "cloud_files() query must emit edges"
     targets = {e.target_col for e in edges}
     assert any("result" in t for t in targets), f"result table missing in targets: {targets}"
+
+
+# ---------------------------------------------------------------------------
+# Recursive CTEs (U1)
+# ---------------------------------------------------------------------------
+
+
+def _no_self_loops(edges, alias: str) -> bool:
+    """No edge should have both source and target rooted on the recursive CTE alias."""
+    for e in edges:
+        s_table = e.source_col.rsplit(".", 1)[0]
+        t_table = e.target_col.rsplit(".", 1)[0]
+        if s_table == alias and t_table == alias:
+            return False
+    return True
+
+
+def test_recursive_cte_org_tree_resolves_to_anchor_source():
+    """org-tree fixture: recursive references must resolve to anchor's source columns,
+    not phantom org_tree.col → org_tree.col self-edges."""
+    sql = """
+    WITH RECURSIVE org_tree AS (
+      SELECT employee_id, name, manager_id, name AS root_name, 0 AS depth
+      FROM employees
+      WHERE manager_id IS NULL
+      UNION ALL
+      SELECT e.employee_id, e.name, e.manager_id, t.root_name, t.depth + 1
+      FROM employees e JOIN org_tree t ON e.manager_id = t.employee_id
+    )
+    SELECT employee_id, name, root_name, depth FROM org_tree
+    """
+    edges = parse_sql(sql, source_file="org.sql", source_line=1).edges
+    # No phantom self-loops on the recursive CTE
+    assert _no_self_loops(edges, "org_tree"), (
+        f"phantom org_tree → org_tree edges leaked: "
+        f"{[(e.source_col, e.target_col) for e in edges]}"
+    )
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # Anchor's name AS root_name must trace from employees.name
+    assert "employees.name" in sources
+    assert "result.root_name" in targets
+    # No edges originate from the recursive CTE alias
+    leaked = [e for e in edges if e.source_col.startswith("org_tree.")]
+    assert not leaked, f"org_tree.X leaked as source: {leaked}"
+
+
+def test_recursive_cte_numbers_values_anchor_no_phantom_edges():
+    """VALUES-anchor recursive CTE: no real source exists; the recursive branch
+    must not produce phantom numbers.n → result.X edges."""
+    sql = """
+    WITH RECURSIVE numbers(n) AS (
+      VALUES (1)
+      UNION ALL
+      SELECT n + 1 FROM numbers WHERE n < 100
+    )
+    SELECT * FROM numbers
+    """
+    edges = parse_sql(sql, source_file="n.sql", source_line=1).edges
+    assert _no_self_loops(edges, "numbers"), (
+        f"phantom self-loops on numbers: {[(e.source_col, e.target_col) for e in edges]}"
+    )
+    # No edges should originate from the recursive CTE alias as a phantom source
+    leaked = [e for e in edges if e.source_col.startswith("numbers.")]
+    assert not leaked, f"numbers.X leaked as phantom source: {leaked}"
+
+
+def test_recursive_cte_bom_join_anchor_resolves_correctly():
+    """BOM fixture with single-table anchor: edges trace from bill_of_materials,
+    not from a phantom bom.col → bom.col."""
+    sql = """
+    WITH RECURSIVE bom AS (
+      SELECT part_id, parent_id, qty FROM bill_of_materials WHERE parent_id IS NULL
+      UNION ALL
+      SELECT b.part_id, b.parent_id, b.qty
+      FROM bill_of_materials b JOIN bom p ON b.parent_id = p.part_id
+    )
+    INSERT INTO bom_summary SELECT part_id, qty FROM bom
+    """
+    edges = parse_sql(sql, source_file="bom.sql", source_line=1).edges
+    assert _no_self_loops(edges, "bom"), (
+        f"phantom self-loops on bom: {[(e.source_col, e.target_col) for e in edges]}"
+    )
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "bill_of_materials.part_id" in sources
+    assert "bill_of_materials.qty" in sources
+    assert "bom_summary.part_id" in targets
+    assert "bom_summary.qty" in targets
+
+
+def test_recursive_cte_max_recursion_level_clause_recognised():
+    """Databricks MAX RECURSION LEVEL N clause must be stripped pre-parse so lineage
+    matches the same query without the clause."""
+    sql_with_clause = """
+    WITH RECURSIVE numbers(n) AS (
+      SELECT id FROM seed
+      UNION ALL
+      SELECT n + 1 FROM numbers WHERE n < 100
+    ) MAX RECURSION LEVEL 100
+    SELECT n FROM numbers
+    """
+    sql_without_clause = """
+    WITH RECURSIVE numbers(n) AS (
+      SELECT id FROM seed
+      UNION ALL
+      SELECT n + 1 FROM numbers WHERE n < 100
+    )
+    SELECT n FROM numbers
+    """
+    r1 = parse_sql(sql_with_clause, source_file="r.sql", source_line=1)
+    r2 = parse_sql(sql_without_clause, source_file="r.sql", source_line=1)
+    # No file-level parse failure on MAX RECURSION LEVEL form
+    assert not r1.warnings, f"unexpected warnings: {r1.warnings}"
+    # Edge sets should match (modulo edge ordering)
+    pairs1 = sorted((e.source_col, e.target_col) for e in r1.edges)
+    pairs2 = sorted((e.source_col, e.target_col) for e in r2.edges)
+    assert pairs1 == pairs2, f"diff with clause: {pairs1}\nwithout: {pairs2}"
+
+
+def test_recursive_cte_limit_all_passes_through():
+    """Databricks Runtime 17.2+ LIMIT ALL must parse without altering lineage."""
+    sql = """
+    WITH RECURSIVE numbers(n) AS (
+      SELECT id FROM seed
+      UNION ALL
+      SELECT n + 1 FROM numbers WHERE n < 100
+    )
+    SELECT n FROM numbers LIMIT ALL
+    """
+    result = parse_sql(sql, source_file="r.sql", source_line=1)
+    assert not result.warnings, f"unexpected warnings: {result.warnings}"
+    # At minimum, anchor's seed → result.n must trace through
+    sources = {e.source_col for e in result.edges}
+    assert any(s.startswith("seed.") for s in sources), f"seed not traced: {sources}"
+
+
+def test_recursive_cte_graph_cycle_detection_no_phantoms():
+    """Graph cycle-detection idiom from the origin SC2 fixture: edges from `graph`
+    columns reach consumers; no search_graph.col → search_graph.col self-edges."""
+    sql = """
+    WITH RECURSIVE search_graph(f, t, depth) AS (
+      SELECT g.f, g.t, 1 FROM graph g
+      UNION ALL
+      SELECT g.f, g.t, sg.depth + 1
+      FROM graph g JOIN search_graph sg ON g.f = sg.t
+    )
+    INSERT INTO graph_paths SELECT f, t, depth FROM search_graph
+    """
+    edges = parse_sql(sql, source_file="g.sql", source_line=1).edges
+    assert _no_self_loops(edges, "search_graph"), (
+        f"phantom self-loops: {[(e.source_col, e.target_col) for e in edges]}"
+    )
+    sources = {e.source_col for e in edges}
+    assert any("graph." in s for s in sources), f"graph not traced: {sources}"
+
+
+def test_recursive_cte_in_insert_consumer_parity():
+    """A recursive CTE used as an INSERT INTO source produces the same source-set as
+    a top-level SELECT consumer."""
+    sql_select = """
+    WITH RECURSIVE r AS (
+      SELECT id, val FROM s
+      UNION ALL
+      SELECT id, val FROM r WHERE id < 100
+    )
+    SELECT id, val FROM r
+    """
+    sql_insert = """
+    WITH RECURSIVE r AS (
+      SELECT id, val FROM s
+      UNION ALL
+      SELECT id, val FROM r WHERE id < 100
+    )
+    INSERT INTO target SELECT id, val FROM r
+    """
+    sources_select = {e.source_col for e in parse_sql(sql_select, source_file="a.sql", source_line=1).edges}
+    sources_insert = {e.source_col for e in parse_sql(sql_insert, source_file="b.sql", source_line=1).edges}
+    assert "s.id" in sources_select and "s.val" in sources_select
+    assert sources_select == sources_insert, (
+        f"select sources {sources_select} != insert sources {sources_insert}"
+    )
+
+
+def test_recursive_cte_mixed_with_non_recursive_cte():
+    """WITH RECURSIVE may declare a mix: only the self-referencing CTE is treated as
+    recursive; the non-recursive one resolves with the standard logic."""
+    sql = """
+    WITH RECURSIVE r AS (
+      SELECT id FROM s
+      UNION ALL
+      SELECT id FROM r WHERE id < 10
+    ),
+    nr AS (
+      SELECT a FROM t
+    )
+    INSERT INTO out_tbl SELECT r.id, nr.a FROM r JOIN nr ON r.id = nr.a
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # Recursive CTE: edges resolve through anchor (s)
+    assert "s.id" in sources, f"missing s.id: {sources}"
+    # Non-recursive CTE: edges resolve through t
+    assert "t.a" in sources, f"missing t.a: {sources}"
+    # Both target columns reach out_tbl
+    assert "out_tbl.id" in targets
+    assert "out_tbl.a" in targets
+    assert _no_self_loops(edges, "r")
+    assert _no_self_loops(edges, "nr")

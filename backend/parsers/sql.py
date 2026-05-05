@@ -4,6 +4,9 @@ import re
 import sqlglot
 
 _TVF_SANITIZE_RE = re.compile(r'[^a-zA-Z0-9_]')
+# Databricks Runtime 16.3+ recursive-CTE option that SQLGlot's databricks dialect
+# does not parse. The clause is purely a runtime guard, irrelevant for lineage.
+_MAX_RECURSION_LEVEL_RE = re.compile(r'\bMAX\s+RECURSION\s+LEVEL\s+\d+\b', re.IGNORECASE)
 import sqlglot.expressions as exp
 from sqlglot import tokens
 from lineage.models import LineageEdge, ParseResult
@@ -65,6 +68,47 @@ def _classify_transform(node: exp.Expression) -> tuple[str, str | None]:
     return "passthrough", expr_str
 
 
+def _select_references_table(node: exp.Expression, alias: str) -> bool:
+    """True if node contains a Table reference whose bare name matches alias (case-insensitive).
+
+    Used to identify the recursive branch of a WITH RECURSIVE CTE — the branch that
+    references the CTE alias as a table.
+    """
+    target = alias.lower()
+    for table in node.find_all(exp.Table):
+        if table.name and table.name.lower() == target:
+            return True
+    return False
+
+
+def _flatten_union_branches(node: exp.Expression) -> list[exp.Expression]:
+    """Recursively flatten a UNION/INTERSECT/EXCEPT tree into a list of branches.
+
+    Unlike _collect_union_selects, this does not require branches to be Selects —
+    bare Values (a recursive-CTE anchor like `VALUES (1) UNION ALL …`) are returned
+    as-is so callers can wrap or inspect them.
+    """
+    if isinstance(node, (exp.Union, exp.Intersect, exp.Except)):
+        return _flatten_union_branches(node.this) + _flatten_union_branches(node.expression)
+    if isinstance(node, exp.Subquery):
+        return _flatten_union_branches(node.this)
+    return [node]
+
+
+def _wrap_non_select_as_select(node: exp.Expression) -> exp.Select | None:
+    """Wrap a non-Select expression (e.g. Values) in a synthetic SELECT * FROM <node>.
+
+    Mirrors what SQLGlot does automatically for bare CTE bodies like
+    `WITH x AS (VALUES (1))` (see SQLGlot Databricks dialect parsing). Returns
+    None when the node cannot be sensibly wrapped.
+    """
+    if isinstance(node, exp.Select):
+        return node
+    if isinstance(node, exp.Values):
+        return exp.Select(expressions=[exp.Star()], **{"from_": exp.From(this=node)})
+    return None
+
+
 def _resolve_ctes(
     statement: exp.Expression,
 ) -> tuple[dict[str, str], dict[str, list[exp.Select]]]:
@@ -77,6 +121,12 @@ def _resolve_ctes(
     Chains in simple_map are resolved (cte2 → cte1 → actual_table).
     Multi-source CTEs are returned as parsed Select bodies so the caller can
     treat them like inline subqueries via resolve_temp_views.
+
+    For WITH RECURSIVE: only the anchor branch(es) are registered. The recursive
+    branch references the CTE alias as a table — including it would generate
+    phantom alias.col → alias.col self-edges. The UNION ALL contract guarantees
+    the anchor and recursive branches share the same column shape, so dropping
+    the recursive branch loses no source attribution.
     """
     simple_map: dict[str, str] = {}
     multi_map: dict[str, list[exp.Select]] = {}
@@ -91,9 +141,38 @@ def _resolve_ctes(
     if not with_clause:
         return simple_map, multi_map
 
+    is_recursive_with = bool(with_clause.args.get("recursive"))
+
     for cte in with_clause.expressions:
         alias = cte.alias
         cte_body = cte.this
+
+        # Recursive CTE handling: only register anchor branches, drop recursive ones.
+        if is_recursive_with and isinstance(cte_body, (exp.Union, exp.Intersect, exp.Except)):
+            all_branches = _flatten_union_branches(cte_body)
+            recursive_branches = [b for b in all_branches if _select_references_table(b, alias)]
+            non_recursive = [b for b in all_branches if b not in recursive_branches]
+            if recursive_branches:
+                # Wrap non-Select anchors (Values, etc.) so the downstream parser can
+                # walk them like the rest. Drop branches we cannot wrap.
+                anchor_selects: list[exp.Select] = []
+                for b in non_recursive:
+                    wrapped = _wrap_non_select_as_select(b)
+                    if wrapped is not None:
+                        anchor_selects.append(wrapped)
+                if len(anchor_selects) == 1:
+                    anchor = anchor_selects[0]
+                    from_clause = anchor.args.get("from_")
+                    has_join = bool(anchor.args.get("joins"))
+                    if from_clause and not has_join and isinstance(from_clause.this, exp.Table):
+                        simple_map[alias] = _qualified_table_name(from_clause.this)
+                        continue
+                # Always register the alias in multi_map (even if anchor_selects is
+                # empty) so the consumer recognises it as a CTE/subquery and does
+                # not treat references to it as real tables.
+                multi_map[alias] = anchor_selects
+                continue
+
         # cte_body is a Select for simple CTEs, or a Union/Except/Intersect for set ops
         is_select = isinstance(cte_body, exp.Select)
         from_clause = cte_body.args.get("from_") if is_select else None
@@ -1106,6 +1185,11 @@ def parse_sql(
     local_warnings: list[str] = []
     statements: list[exp.Expression] = []
     for stmt_sql in _split_top_level_statements(sql):
+        # Strip Databricks recursive-CTE runtime option that SQLGlot doesn't parse.
+        # Safe inside string literals because the regex requires the keywords to be
+        # bare-word boundaries; quoted occurrences are extremely unlikely and would
+        # at worst pass through unchanged (then surface as a normal parse warning).
+        stmt_sql = _MAX_RECURSION_LEVEL_RE.sub("", stmt_sql)
         try:
             parsed = sqlglot.parse_one(_normalize_double_quotes(stmt_sql), dialect="databricks")
         except Exception as exc:
