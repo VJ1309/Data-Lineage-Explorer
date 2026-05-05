@@ -57,6 +57,33 @@ class VirtualSource:
     body_sql: str
 
 
+@dataclass
+class NormalizeResult:
+    """Return shape of `normalize_script`.
+
+    `flat_sql`, `virtual_sources`, `bindings` are unchanged from the U2 contract.
+    `warnings` (added in U5) carries per-statement notes the walker emits for
+    placeholder constructs (CALL → `__call_*__`, EXECUTE IMMEDIATE → `__dynamic_sql__`).
+
+    `__iter__` yields the original 3-tuple so existing callers using
+    `flat, virt, bindings = normalize_script(sql)` keep working — warnings is
+    attribute-only.
+    """
+
+    flat_sql: str
+    virtual_sources: list[VirtualSource]
+    bindings: dict[str, str]
+    warnings: list[str]
+
+    def __iter__(self):
+        yield self.flat_sql
+        yield self.virtual_sources
+        yield self.bindings
+
+    def __getitem__(self, idx):
+        return (self.flat_sql, self.virtual_sources, self.bindings)[idx]
+
+
 # Module-level procedure registry (populated by U5; queryable by v2 cross-file work).
 _PROCEDURE_REGISTRY: dict[str, str] = {}
 
@@ -75,11 +102,24 @@ import re as _re
 _PROCEDURAL_KEYWORDS = (
     "begin", "declare", "execute immediate", "create procedure",
     "create or replace procedure", "call ",
+    "drop procedure", "describe procedure", "show procedures",
     # Control-flow keywords likely to indicate scripting (not a guarantee — the
     # walker confirms). FOR appears inside SELECT INTO too, so the walker must
     # disambiguate.
     " if ", " while ", " loop ", " repeat ", " for ",
 )
+
+
+# Sanitiser for synthetic CALL/dynamic-SQL names (matches _TVF_SANITIZE_RE in sql.py).
+_SYNTHETIC_NAME_SANITISE_RE = _re.compile(r"[^a-zA-Z0-9_]")
+
+
+def _sanitise_synthetic(name: str) -> str:
+    """Convert a qualified identifier (e.g. catalog.schema.proc) into a safe synthetic
+    identifier (catalog_schema_proc). Mirrors the convention used by _TVF_SANITIZE_RE
+    in parsers/sql.py."""
+    cleaned = _SYNTHETIC_NAME_SANITISE_RE.sub("_", name).strip("_")
+    return cleaned or "anon"
 
 
 def _has_procedural_keyword(sql: str) -> bool:
@@ -179,6 +219,7 @@ class _Walker:
         self.i = 0  # index into toks
         self.hoisted: list[str] = []  # collected DML statements (raw text)
         self.virtual_sources: list[VirtualSource] = []
+        self.warnings: list[str] = []  # per-statement notes (CALL placeholder, dynamic SQL)
         self.top_scope = _Scope(bindings={}, parent=None)
         self.failed = False
         # Stack of active FOR-cursor variable rewrites: each entry is (var_name, synthetic_name).
@@ -291,6 +332,57 @@ class _Walker:
         if _kw(tok, "SIGNAL", "RESIGNAL", "LEAVE", "ITERATE"):
             self._consume_until_terminator()
             return
+
+        # CALL <proc>(args) — placeholder synthesis (U5).
+        # SQLGlot tokenizes CALL as COMMAND, sweeping the rest of the statement into
+        # a single STRING token. We match the COMMAND token type explicitly because
+        # _kw() text-matching also fires on a STRING containing "CALL", but the COMMAND
+        # token-type check is the reliable signal.
+        if tok.token_type == tokens.TokenType.COMMAND and (tok.text or "").upper() == "CALL":
+            self._handle_call(scope)
+            return
+
+        # CREATE [OR REPLACE] PROCEDURE [IF NOT EXISTS] ... — strip wrapper, walk body (U5)
+        if (_kw(tok, "CREATE") or tok.token_type == tokens.TokenType.CREATE) \
+                and self._is_create_procedure():
+            self._handle_create_procedure(scope)
+            return
+
+        # DROP PROCEDURE / DESCRIBE [EXTENDED] PROCEDURE / SHOW PROCEDURES — silent skip (U5)
+        if _kw(tok, "DROP") or tok.token_type == tokens.TokenType.DROP:
+            nxt = self._peek(1)
+            if nxt is not None and (
+                _kw(nxt, "PROCEDURE") or nxt.token_type == tokens.TokenType.PROCEDURE
+            ):
+                self._consume_until_terminator()
+                return
+        if _kw(tok, "DESCRIBE", "DESC") or tok.token_type == tokens.TokenType.DESCRIBE:
+            nxt = self._peek(1)
+            if nxt is not None and _kw(nxt, "EXTENDED"):
+                nxt = self._peek(2)
+            if nxt is not None and (
+                _kw(nxt, "PROCEDURE") or nxt.token_type == tokens.TokenType.PROCEDURE
+            ):
+                self._consume_until_terminator()
+                return
+        if _kw(tok, "SHOW") or tok.token_type == tokens.TokenType.SHOW:
+            nxt = self._peek(1)
+            # SHOW PROCEDURES tokenizes as SHOW + STRING('PROCEDURES ...') — the
+            # tokenizer eats everything after SHOW into a single STRING.
+            is_procs = nxt is not None and (
+                _kw(nxt, "PROCEDURES")
+                or (
+                    nxt.token_type == tokens.TokenType.STRING
+                    and (nxt.text or "").lstrip().upper().startswith("PROCEDURES")
+                )
+            )
+            if is_procs:
+                self._advance()  # SHOW
+                if not self._eof():
+                    self._advance()  # STRING payload (or PROCEDURES bare token)
+                # If a bare PROCEDURES, drain the rest of the statement
+                self._consume_until_terminator()
+                return
 
         # Hoist DML / DDL verbatim
         if (
@@ -620,6 +712,150 @@ class _Walker:
             if var_name:
                 self._for_rewrites.pop()
         raise _UnbalancedBlock(f"unclosed FOR at offset {for_tok.start}")
+
+    # ---- CREATE PROCEDURE / CALL / silent-skip DDL (U5) ------------------
+
+    def _is_create_procedure(self) -> bool:
+        """Peek from CREATE token to determine whether this is CREATE PROCEDURE.
+
+        Recognises:
+            CREATE PROCEDURE ...
+            CREATE OR REPLACE PROCEDURE ...
+        """
+        j = self.i + 1
+        if j < len(self.toks) and _kw(self.toks[j], "OR"):
+            j += 1
+            if j < len(self.toks) and _kw(self.toks[j], "REPLACE"):
+                j += 1
+        return j < len(self.toks) and _kw(self.toks[j], "PROCEDURE")
+
+    def _read_qualified_name(self) -> str:
+        """Read a sequence of `VAR (DOT VAR)*` tokens and return the joined name.
+
+        Returns the empty string if the cursor is not at a VAR token. Used by
+        CREATE PROCEDURE / CALL handlers to extract qualified procedure names.
+        """
+        parts: list[str] = []
+        while not self._eof():
+            tok = self._peek()
+            if tok.token_type == tokens.TokenType.VAR:
+                parts.append(tok.text)
+                self._advance()
+                if not self._eof() and self._peek().token_type == tokens.TokenType.DOT:
+                    self._advance()
+                    continue
+                break
+            break
+        return ".".join(parts)
+
+    def _skip_paren_balanced(self) -> None:
+        """If the cursor is at L_PAREN, consume through the matching R_PAREN.
+
+        Tracks paren depth so nested parentheses inside argument lists are handled.
+        No-op if the cursor isn't at an opening paren.
+        """
+        if self._eof() or self._peek().token_type != tokens.TokenType.L_PAREN:
+            return
+        depth = 0
+        while not self._eof():
+            t = self._peek()
+            if t.token_type == tokens.TokenType.L_PAREN:
+                depth += 1
+                self._advance()
+                continue
+            if t.token_type == tokens.TokenType.R_PAREN:
+                depth -= 1
+                self._advance()
+                if depth == 0:
+                    return
+                continue
+            self._advance()
+
+    def _handle_create_procedure(self, scope: _Scope) -> None:
+        """CREATE [OR REPLACE] PROCEDURE [IF NOT EXISTS] qname(params) characteristics
+        AS BEGIN ... END.
+
+        Strips the wrapper and walks the body via _handle_begin_end so embedded DML
+        hoists into the outer flat list. Registers (qname, body_sql) in
+        _PROCEDURE_REGISTRY for v2 cross-file CALL resolution.
+        """
+        self._advance()  # CREATE
+        if not self._eof() and _kw(self._peek(), "OR"):
+            self._advance()  # OR
+            if not self._eof() and _kw(self._peek(), "REPLACE"):
+                self._advance()  # REPLACE
+        if not self._eof() and _kw(self._peek(), "PROCEDURE"):
+            self._advance()  # PROCEDURE
+        # IF NOT EXISTS (optional)
+        if not self._eof() and _kw(self._peek(), "IF"):
+            self._advance()
+            if not self._eof() and _kw(self._peek(), "NOT"):
+                self._advance()
+            if not self._eof() and _kw(self._peek(), "EXISTS"):
+                self._advance()
+        # Qualified procedure name
+        qname = self._read_qualified_name()
+        # Parameter list (paren-balanced) — strip entirely; v1 has no parameter
+        # lineage. IN/OUT/INOUT modes and DEFAULTs are eaten with the parens.
+        self._skip_paren_balanced()
+        # Skip characteristics (LANGUAGE SQL, SQL SECURITY ..., COMMENT '...', etc.)
+        # until we reach AS.
+        while not self._eof():
+            tok = self._peek()
+            if _kw(tok, "AS"):
+                self._advance()
+                break
+            self._advance()
+        # Body must start with BEGIN
+        if self._eof() or not _kw(self._peek(), "BEGIN"):
+            self._consume_until_terminator()
+            return
+        begin_tok = self._peek()
+        body_start = begin_tok.start
+        i_before = self.i
+        try:
+            self._handle_begin_end(scope)
+        except _UnbalancedBlock:
+            # Roll forward to terminator so the outer walker keeps moving rather than
+            # bailing on the whole script.
+            self.i = i_before
+            self._consume_until_terminator()
+            return
+        # Capture body slice from BEGIN through the last consumed token (END or label).
+        if self.i > i_before and qname:
+            last_tok = self.toks[self.i - 1]
+            body_end = last_tok.end + 1
+            body_sql = self.sql[body_start:body_end]
+            _PROCEDURE_REGISTRY[qname] = body_sql
+
+    def _handle_call(self, scope: _Scope) -> None:
+        """CALL qname(args) — emit a self-edge placeholder against `__call_<sanitised>__`
+        and append a per-statement warning.
+
+        SQLGlot's databricks dialect tokenizes CALL as a COMMAND that sweeps the
+        rest of the statement into a single STRING token (the body containing the
+        proc name and parenthesised arg list). The qname is everything before the
+        first '(' in the STRING payload.
+
+        The hoisted form `INSERT INTO __call_x__ SELECT * FROM __call_x__` flows
+        through the existing parser pipeline as a wildcard self-edge; no special
+        case in `_parse_single_statement` is needed.
+        """
+        self._advance()  # CALL (COMMAND)
+        payload = ""
+        if not self._eof() and self._peek().token_type == tokens.TokenType.STRING:
+            payload = self._peek().text or ""
+            self._advance()
+        qname = payload.split("(", 1)[0].strip() or "anon"
+        sanitised = _sanitise_synthetic(qname)
+        synthetic = f"__call_{sanitised}__"
+        self._synthetic_names.add(synthetic)
+        self.hoisted.append(
+            f"INSERT INTO {synthetic} SELECT * FROM {synthetic}"
+        )
+        self.warnings.append(
+            f"Unresolved CALL to {qname}; cross-file body resolution deferred to v2"
+        )
 
     def _next_synthetic_name(self, base: str) -> str:
         if base not in self._synthetic_names:
@@ -975,26 +1211,27 @@ def _fold_single_operand(toks: list, scope: _Scope, *, depth: int) -> str | None
 # ---------------------------------------------------------------------------
 
 
-def normalize_script(sql: str) -> tuple[str, list[VirtualSource], dict[str, str]]:
+def normalize_script(sql: str) -> NormalizeResult:
     """Pre-process Databricks SQL/PSM into flat DML.
 
-    Returns:
-        flattened_sql      — SQL safe for _split_top_level_statements; identical to
-                             input when no procedural keywords are present, or when
-                             the walker fails to balance blocks (graceful degradation).
-        virtual_sources    — list of VirtualSource entries the engine should hoist
-                             as synthetic temp views (empty in U2; populated in U4).
-        bindings           — top-scope variable bindings the EXECUTE IMMEDIATE folder
-                             (U6) consults to resolve `||` chains over DECLAREd literals.
+    Returns NormalizeResult; see its docstring for field semantics. Iterating the
+    result yields the original 3-tuple `(flat_sql, virtual_sources, bindings)` so
+    `flat, virt, bindings = normalize_script(sql)` unpacks unchanged. New callers
+    that need warnings access `result.warnings` directly.
     """
     if not _has_procedural_keyword(sql):
-        return sql, [], {}
+        return NormalizeResult(flat_sql=sql, virtual_sources=[], bindings={}, warnings=[])
     toks = _tokens(sql)
     if not toks:
-        return sql, [], {}
+        return NormalizeResult(flat_sql=sql, virtual_sources=[], bindings={}, warnings=[])
     walker = _Walker(sql, toks)
     walker.walk_top_level()
     if walker.failed or not walker.hoisted:
         # Graceful degradation: return input unchanged so parse_sql falls through.
-        return sql, [], {}
-    return ";\n".join(walker.hoisted) + ";", walker.virtual_sources, walker.top_scope.bindings
+        return NormalizeResult(flat_sql=sql, virtual_sources=[], bindings={}, warnings=[])
+    return NormalizeResult(
+        flat_sql=";\n".join(walker.hoisted) + ";",
+        virtual_sources=walker.virtual_sources,
+        bindings=walker.top_scope.bindings,
+        warnings=walker.warnings,
+    )

@@ -802,6 +802,42 @@ def _wildcard_edge(
     )
 
 
+def _is_placeholder_column(col: str) -> bool:
+    """True if `col` lives on a synthetic CALL or dynamic-SQL placeholder table.
+
+    `__for_*__` synthetic temp views are excluded — those are real cursor sources
+    that resolve_temp_views collapses to underlying tables; their edges should
+    keep their normal confidence/qualified flags.
+    """
+    if "." not in col:
+        return False
+    table = col.rsplit(".", 1)[0]
+    return table.startswith("__call_") or table == "__dynamic_sql__"
+
+
+def _downgrade_placeholder_edge(e: LineageEdge) -> LineageEdge:
+    """Recast an edge involving a CALL/dynamic-SQL placeholder as an approximate
+    wildcard. The hoisted form `INSERT INTO __call_x__ SELECT * FROM __call_x__`
+    flows through the normal parser pipeline producing a `certain/qualified=True`
+    edge — that's misleading for an unresolved placeholder, so we normalise it
+    to the same `_wildcard_edge` shape used by other approximate sites."""
+    if not (_is_placeholder_column(e.source_col) or _is_placeholder_column(e.target_col)):
+        return e
+    if e.confidence == "approximate" and not e.qualified and e.expression is None:
+        return e
+    return LineageEdge(
+        source_col=e.source_col,
+        target_col=e.target_col,
+        transform_type="passthrough",
+        expression=None,
+        source_file=e.source_file,
+        source_cell=e.source_cell,
+        source_line=e.source_line,
+        confidence="approximate",
+        qualified=False,
+    )
+
+
 def _parse_copy(
     copy_stmt: exp.Copy,
     source_file: str,
@@ -905,7 +941,8 @@ def _parse_single_statement(
             source_file, source_line, source_cell,
             subquery_aliases=subquery_aliases,
         ))
-    return resolve_temp_views(edges, subquery_aliases)
+    edges = resolve_temp_views(edges, subquery_aliases)
+    return [_downgrade_placeholder_edge(e) for e in edges]
 
 
 def resolve_temp_views(
@@ -1190,7 +1227,9 @@ def parse_sql(
     # actually understands. When the input has no procedural keywords this is
     # a cheap no-op. Bindings (3rd return) are wired in U6.
     if _has_procedural_keyword(sql):
-        sql, _virtual_sources, _bindings = normalize_script(sql)
+        norm = normalize_script(sql)
+        sql = norm.flat_sql
+        local_warnings.extend(norm.warnings)
     for stmt_sql in _split_top_level_statements(sql):
         # Strip Databricks recursive-CTE runtime option that SQLGlot doesn't parse.
         # Safe inside string literals because the regex requires the keywords to be

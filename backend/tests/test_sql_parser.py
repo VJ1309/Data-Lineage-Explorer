@@ -1726,6 +1726,104 @@ END
     assert "raw_orders.name" in sources
 
 
+# ---------------------------------------------------------------------------
+# U5 end-to-end: stored procedures + CALL placeholder
+# ---------------------------------------------------------------------------
+
+
+def test_procedure_body_with_plain_dml_produces_real_edges():
+    """CREATE PROCEDURE wrapper is stripped; embedded DML produces real edges
+    identical to the same DML at top level."""
+    sql = """
+    CREATE PROCEDURE p()
+    LANGUAGE SQL SQL SECURITY INVOKER
+    AS BEGIN
+      INSERT INTO t SELECT a, b FROM s;
+    END
+    """
+    edges = parse_sql(sql, source_file="proc.sql", source_line=1).edges
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    assert "s.a" in sources, f"s.a missing: {sources}"
+    assert "s.b" in sources, f"s.b missing: {sources}"
+    assert "t.a" in targets
+    assert "t.b" in targets
+    # Wrapper must not leak into edges
+    assert not any("PROCEDURE" in e.source_col or "PROCEDURE" in e.target_col for e in edges)
+
+
+def test_procedure_body_parity_with_top_level():
+    top = "INSERT INTO t SELECT a FROM s"
+    wrapped = (
+        "CREATE OR REPLACE PROCEDURE my_catalog.my_schema.proc_a() "
+        "LANGUAGE SQL AS BEGIN INSERT INTO t SELECT a FROM s; END"
+    )
+    e_top = sorted((e.source_col, e.target_col) for e in parse_sql(top, source_file="t.sql", source_line=1).edges)
+    e_wrap = sorted((e.source_col, e.target_col) for e in parse_sql(wrapped, source_file="w.sql", source_line=1).edges)
+    assert e_top == e_wrap, f"top: {e_top}\nwrapped: {e_wrap}"
+
+
+def test_procedure_registers_qualified_name_in_module_registry():
+    from parsers.sql_script import _PROCEDURE_REGISTRY
+    sql = (
+        "CREATE OR REPLACE PROCEDURE my_catalog.my_schema.proc_x() "
+        "LANGUAGE SQL AS BEGIN INSERT INTO t SELECT 1 AS x FROM dual; END"
+    )
+    parse_sql(sql, source_file="reg.sql", source_line=1)
+    assert "my_catalog.my_schema.proc_x" in _PROCEDURE_REGISTRY
+
+
+def test_call_emits_wildcard_self_edge_and_warning():
+    """CALL produces a self-edge against the synthetic __call_<proc>__ table plus
+    a per-statement warning (cross-file CALL resolution deferred to v2)."""
+    sql = "CALL my_catalog.my_schema.run_etl('raw', 'silver')"
+    result = parse_sql(sql, source_file="call.sql", source_line=1)
+    edges = result.edges
+    # Self-edge present on the synthetic
+    synthetic = "__call_my_catalog_my_schema_run_etl__"
+    assert any(
+        e.source_col == f"{synthetic}.*" and e.target_col == f"{synthetic}.*"
+        for e in edges
+    ), f"placeholder self-edge missing; edges={[(e.source_col, e.target_col) for e in edges]}"
+    # Confidence flag is approximate (mirrors other wildcard-edge sites)
+    placeholder_edges = [e for e in edges if e.source_col.startswith(f"{synthetic}.")]
+    assert all(e.confidence == "approximate" for e in placeholder_edges), placeholder_edges
+    # Per-statement warning surfaces
+    assert any(
+        "Unresolved CALL to my_catalog.my_schema.run_etl" in w for w in result.warnings
+    ), f"missing CALL warning; got: {result.warnings}"
+
+
+def test_call_with_named_parameters_uses_proc_name_only():
+    sql = "CALL run_etl(target_schema => 'silver', source_schema => 'raw')"
+    result = parse_sql(sql, source_file="call.sql", source_line=1)
+    synthetic = "__call_run_etl__"
+    assert any(
+        e.source_col == f"{synthetic}.*" and e.target_col == f"{synthetic}.*"
+        for e in result.edges
+    )
+
+
+def test_drop_describe_show_procedure_silently_skipped():
+    """DROP/DESCRIBE/SHOW PROCEDURE produce zero edges and zero warnings — even when
+    interleaved with valid DML in the same script."""
+    sql = (
+        "BEGIN "
+        "DROP PROCEDURE IF EXISTS my_proc; "
+        "DESCRIBE PROCEDURE EXTENDED my_proc; "
+        "SHOW PROCEDURES FROM my_schema; "
+        "INSERT INTO t SELECT a FROM s; "
+        "END"
+    )
+    result = parse_sql(sql, source_file="ddl.sql", source_line=1)
+    targets = {e.target_col for e in result.edges}
+    assert "t.a" in targets, f"surviving DML lost: {targets}"
+    # No spurious warnings from the silently-skipped PROCEDURE statements
+    assert not any(
+        "PROCEDURE" in w.upper() for w in result.warnings
+    ), f"silent-skip leaked a warning: {result.warnings}"
+
+
 def test_recursive_cte_mixed_with_non_recursive_cte():
     """WITH RECURSIVE may declare a mix: only the self-referencing CTE is treated as
     recursive; the non-recursive one resolves with the standard logic."""

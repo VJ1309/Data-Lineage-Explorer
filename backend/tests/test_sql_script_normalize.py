@@ -450,3 +450,102 @@ def test_for_keyword_inside_select_not_treated_as_loop():
     sql = "BEGIN INSERT INTO t SELECT a FROM s; END"
     flat, _, _ = normalize_script(sql)
     assert "__for_" not in flat
+
+
+# ---------------------------------------------------------------------------
+# CREATE PROCEDURE / CALL / DROP / DESCRIBE / SHOW PROCEDURE (U5)
+# ---------------------------------------------------------------------------
+
+
+def test_create_procedure_strips_wrapper_and_hoists_body():
+    sql = """
+    CREATE PROCEDURE p()
+    LANGUAGE SQL
+    AS BEGIN
+      INSERT INTO t SELECT a FROM s;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    # Wrapper gone, body hoisted
+    assert "CREATE PROCEDURE" not in flat
+    assert "LANGUAGE SQL" not in flat
+    assert "INSERT INTO t SELECT a FROM s" in flat
+
+
+def test_create_or_replace_procedure_strips_with_full_qualifier():
+    sql = """
+    CREATE OR REPLACE PROCEDURE my_catalog.my_schema.run_etl()
+    LANGUAGE SQL SQL SECURITY INVOKER COMMENT 'runs etl' NOT DETERMINISTIC
+    AS BEGIN
+      INSERT INTO logs SELECT 1 AS x FROM dual;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "CREATE OR REPLACE PROCEDURE" not in flat
+    assert "INSERT INTO logs" in flat
+
+
+def test_create_procedure_with_param_modes_and_defaults():
+    sql = """
+    CREATE PROCEDURE p(IN n INT, OUT result STRING, INOUT counter BIGINT DEFAULT 0)
+    LANGUAGE SQL
+    AS BEGIN
+      INSERT INTO logs SELECT a FROM s;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "INSERT INTO logs" in flat
+    # Parameter list should be entirely stripped — no IN/OUT/INOUT survives
+    for kw in ("IN n", "OUT result", "INOUT counter"):
+        assert kw not in flat
+
+
+def test_create_procedure_registers_qualified_name():
+    from parsers.sql_script import _PROCEDURE_REGISTRY
+    sql = """
+    CREATE OR REPLACE PROCEDURE my_catalog.my_schema.proc_a()
+    LANGUAGE SQL
+    AS BEGIN
+      INSERT INTO t SELECT 1 AS x FROM dual;
+    END
+    """
+    normalize_script(sql)
+    assert "my_catalog.my_schema.proc_a" in _PROCEDURE_REGISTRY
+    body = _PROCEDURE_REGISTRY["my_catalog.my_schema.proc_a"]
+    assert "INSERT INTO t" in body
+
+
+def test_call_emits_placeholder_marker():
+    """CALL <proc>(args) becomes a placeholder INSERT/SELECT through __call_<proc>__
+    so the parser emits an approximate wildcard edge."""
+    sql = "CALL my_catalog.my_schema.run_etl('raw', 'silver')"
+    flat, _, _ = normalize_script(sql)
+    # Synthetic name uses sanitised proc name (dots -> underscores)
+    assert "__call_my_catalog_my_schema_run_etl__" in flat
+
+
+def test_call_with_named_parameters():
+    sql = "CALL run_etl(target_schema => 'silver', source_schema => 'raw')"
+    flat, _, _ = normalize_script(sql)
+    assert "__call_run_etl__" in flat
+
+
+def test_drop_procedure_silently_skipped():
+    sql = "DROP PROCEDURE IF EXISTS my_proc"
+    flat, _, _ = normalize_script("BEGIN " + sql + "; INSERT INTO t SELECT a FROM s; END")
+    assert "DROP" not in flat
+    assert "INSERT INTO t" in flat
+
+
+def test_describe_procedure_silently_skipped():
+    sql = "BEGIN DESCRIBE PROCEDURE EXTENDED my_proc; INSERT INTO t SELECT a FROM s; END"
+    flat, _, _ = normalize_script(sql)
+    assert "DESCRIBE" not in flat
+    assert "INSERT INTO t" in flat
+
+
+def test_show_procedures_silently_skipped():
+    sql = "BEGIN SHOW PROCEDURES FROM my_schema; INSERT INTO t SELECT a FROM s; END"
+    flat, _, _ = normalize_script(sql)
+    assert "SHOW PROCEDURES" not in flat
+    assert "INSERT INTO t" in flat
