@@ -2,6 +2,7 @@
 from __future__ import annotations
 import re
 import sqlglot
+from parsers.sql_script import normalize_script, _has_procedural_keyword
 
 _TVF_SANITIZE_RE = re.compile(r'[^a-zA-Z0-9_]')
 # Databricks Runtime 16.3+ recursive-CTE option that SQLGlot's databricks dialect
@@ -1184,6 +1185,12 @@ def parse_sql(
     """
     local_warnings: list[str] = []
     statements: list[exp.Expression] = []
+    # Pre-process Databricks SQL/PSM (BEGIN/IF/WHILE/CREATE PROCEDURE/EXECUTE
+    # IMMEDIATE/CALL): strip procedural wrappers so SQLGlot only sees DML it
+    # actually understands. When the input has no procedural keywords this is
+    # a cheap no-op. Bindings (3rd return) are wired in U6.
+    if _has_procedural_keyword(sql):
+        sql, _virtual_sources, _bindings = normalize_script(sql)
     for stmt_sql in _split_top_level_statements(sql):
         # Strip Databricks recursive-CTE runtime option that SQLGlot doesn't parse.
         # Safe inside string literals because the regex requires the keywords to be

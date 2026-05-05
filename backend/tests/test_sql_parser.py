@@ -1611,6 +1611,98 @@ def test_recursive_cte_in_insert_consumer_parity():
     )
 
 
+# ---------------------------------------------------------------------------
+# Procedural wrapper parity (U3) — embedded DML must produce the same edges
+# as the same DML at top level
+# ---------------------------------------------------------------------------
+
+
+def test_procedural_begin_end_parity_with_top_level():
+    top = "INSERT INTO t SELECT a FROM s"
+    wrapped = "BEGIN INSERT INTO t SELECT a FROM s; END"
+    e_top = sorted((e.source_col, e.target_col) for e in parse_sql(top, source_file="t.sql", source_line=1).edges)
+    e_wrapped = sorted((e.source_col, e.target_col) for e in parse_sql(wrapped, source_file="w.sql", source_line=1).edges)
+    assert e_top == e_wrapped, f"top: {e_top}\nwrapped: {e_wrapped}"
+
+
+def test_procedural_if_else_each_branch_emits_edges():
+    sql = """
+    BEGIN
+      IF flag = 1 THEN
+        INSERT INTO branch_a SELECT col1 FROM s;
+      ELSE
+        INSERT INTO branch_b SELECT col2 FROM s;
+      END IF;
+    END
+    """
+    edges = parse_sql(sql, source_file="if.sql", source_line=1).edges
+    targets = {e.target_col for e in edges}
+    assert "branch_a.col1" in targets, f"branch_a.col1 missing: {targets}"
+    assert "branch_b.col2" in targets, f"branch_b.col2 missing: {targets}"
+
+
+def test_procedural_multiple_inserts_in_block():
+    sql = "BEGIN INSERT INTO a SELECT col1 FROM s; INSERT INTO b SELECT col2 FROM s; END"
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    targets = {e.target_col for e in edges}
+    assert "a.col1" in targets, f"a.col1 missing: {targets}"
+    assert "b.col2" in targets, f"b.col2 missing: {targets}"
+
+
+def test_procedural_pre_check_false_positive_with_string_literal():
+    """SQL containing the word BEGIN inside a string literal must not be mangled
+    by the normaliser — same edges as direct parse."""
+    sql = "INSERT INTO logs SELECT msg, 'BEGIN run' AS literal_msg FROM events"
+    edges = parse_sql(sql, source_file="lg.sql", source_line=1).edges
+    targets = {e.target_col for e in edges}
+    assert "logs.msg" in targets, f"missing logs.msg: {targets}"
+
+
+def test_procedural_malformed_inner_does_not_drop_other_statements():
+    """A malformed embedded INSERT produces a per-statement warning while sibling
+    statements still emit edges."""
+    sql = """
+    BEGIN
+      INSERT INTO good SELECT a FROM s;
+      INSERT INTO bad SELECT FROM ;
+      INSERT INTO good2 SELECT b FROM s;
+    END
+    """
+    result = parse_sql(sql, source_file="b.sql", source_line=1)
+    targets = {e.target_col for e in result.edges}
+    assert "good.a" in targets
+    assert "good2.b" in targets
+    # The malformed statement surfaces as a per-statement warning, not file-level
+    assert any("INSERT INTO bad" in w or "bad" in w.lower() or "FROM" in w for w in result.warnings), (
+        f"expected per-statement warning for malformed INSERT: {result.warnings}"
+    )
+
+
+def test_procedural_in_databricks_notebook_cell():
+    """Per-cell parsing (engine path with _resolve_views=False) must work for cells
+    containing procedural blocks, then resolve_temp_views composes correctly."""
+    sql = """-- Databricks notebook source
+
+-- COMMAND ----------
+
+CREATE OR REPLACE TEMPORARY VIEW v AS SELECT id, name FROM raw_orders;
+
+-- COMMAND ----------
+
+BEGIN
+  INSERT INTO target SELECT id, name FROM v;
+END
+"""
+    edges = _parse_sql_notebook(sql, source_file="nb.sql")
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert "target.id" in targets
+    assert "target.name" in targets
+    # Temp view collapsed: real source must reach target
+    assert "raw_orders.id" in sources
+    assert "raw_orders.name" in sources
+
+
 def test_recursive_cte_mixed_with_non_recursive_cte():
     """WITH RECURSIVE may declare a mix: only the self-referencing CTE is treated as
     recursive; the non-recursive one resolves with the standard logic."""
