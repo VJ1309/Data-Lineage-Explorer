@@ -1678,6 +1678,29 @@ def test_procedural_malformed_inner_does_not_drop_other_statements():
     )
 
 
+def test_for_cursor_end_to_end_resolves_to_real_source():
+    """The cursor query becomes a synthetic temp view; body refs resolve through it
+    to the real underlying table. The synthetic name must NOT survive in edges."""
+    sql = """
+    BEGIN
+      process_orders: FOR row AS SELECT order_id, amount FROM orders DO
+        INSERT INTO summary SELECT row.order_id, row.amount;
+      END FOR process_orders;
+    END
+    """
+    edges = parse_sql(sql, source_file="for.sql", source_line=1).edges
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # Real source attribution
+    assert "orders.order_id" in sources, f"orders.order_id missing: {sources}"
+    assert "orders.amount" in sources, f"orders.amount missing: {sources}"
+    assert "summary.order_id" in targets
+    assert "summary.amount" in targets
+    # Synthetic name collapsed by resolve_temp_views
+    leaked = [e for e in edges if "__for_" in e.source_col or "__for_" in e.target_col]
+    assert not leaked, f"synthetic __for_ names leaked: {leaked}"
+
+
 def test_procedural_in_databricks_notebook_cell():
     """Per-cell parsing (engine path with _resolve_views=False) must work for cells
     containing procedural blocks, then resolve_temp_views composes correctly."""

@@ -349,3 +349,104 @@ def test_virtual_sources_empty_in_u2():
     sql = "BEGIN INSERT INTO t SELECT a FROM s; END"
     _, virt, _ = normalize_script(sql)
     assert virt == []
+
+
+# ---------------------------------------------------------------------------
+# FOR cursor virtual sources (U4)
+# ---------------------------------------------------------------------------
+
+
+def test_for_cursor_emits_temp_view_and_rewrites_body():
+    """FOR row AS query DO body END FOR — the cursor query becomes a synthetic
+    temp view; qualified references to `row.col` inside the body are rewritten
+    to `__for_row__.col` before hoisting."""
+    sql = """
+    BEGIN
+      FOR row AS SELECT order_id, amount FROM orders DO
+        INSERT INTO summary SELECT row.order_id, row.amount;
+      END FOR;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    # Synthetic temp view defined from cursor query
+    assert "__for_row__" in flat
+    assert "CREATE OR REPLACE TEMPORARY VIEW __for_row__" in flat
+    assert "SELECT order_id, amount FROM orders" in flat
+    # Body's row.X references rewritten to __for_row__.X
+    assert "__for_row__.order_id" in flat
+    assert "__for_row__.amount" in flat
+    # Original `row.` references must not survive
+    assert "row.order_id" not in flat
+    assert "row.amount" not in flat
+
+
+def test_for_cursor_labelled_uses_label_for_synthetic_name():
+    sql = """
+    BEGIN
+      process_orders: FOR row AS SELECT id FROM orders DO
+        INSERT INTO out SELECT row.id;
+      END FOR process_orders;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "__for_process_orders__" in flat
+    assert "__for_process_orders__.id" in flat
+
+
+def test_for_cursor_nested_loops_each_get_own_synthetic():
+    sql = """
+    BEGIN
+      FOR outer_row AS SELECT order_id FROM orders DO
+        FOR inner_row AS SELECT line_id FROM order_lines WHERE order_id = outer_row.order_id DO
+          INSERT INTO log SELECT outer_row.order_id, inner_row.line_id;
+        END FOR;
+      END FOR;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "__for_outer_row__" in flat
+    assert "__for_inner_row__" in flat
+    # Each cursor's body references resolve to its own synthetic
+    assert "__for_outer_row__.order_id" in flat
+    assert "__for_inner_row__.line_id" in flat
+
+
+def test_for_cursor_unique_names_on_collision():
+    """Two FOR loops with the same variable name get unique synthetic names."""
+    sql = """
+    BEGIN
+      FOR row AS SELECT a FROM s1 DO
+        INSERT INTO t1 SELECT row.a;
+      END FOR;
+      FOR row AS SELECT b FROM s2 DO
+        INSERT INTO t2 SELECT row.b;
+      END FOR;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "__for_row__" in flat
+    assert "__for_row_2__" in flat
+
+
+def test_for_cursor_leave_inside_body_skipped():
+    """LEAVE <label> inside a FOR body is recognised and skipped; body DML still hoisted."""
+    sql = """
+    BEGIN
+      process: FOR row AS SELECT a FROM s DO
+        INSERT INTO t SELECT row.a;
+        LEAVE process;
+      END FOR process;
+    END
+    """
+    flat, _, _ = normalize_script(sql)
+    assert "INSERT INTO t" in flat
+    assert "LEAVE" not in flat.upper()
+
+
+def test_for_keyword_inside_select_not_treated_as_loop():
+    """A bare INSERT must not have its `FOR` (e.g. in `FOR UPDATE`, or column-list
+    contexts) confused with a loop — only block-level `FOR var AS query DO`
+    triggers the cursor path."""
+    sql = "BEGIN INSERT INTO t SELECT a FROM s; END"
+    flat, _, _ = normalize_script(sql)
+    assert "__for_" not in flat

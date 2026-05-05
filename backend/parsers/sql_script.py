@@ -181,6 +181,12 @@ class _Walker:
         self.virtual_sources: list[VirtualSource] = []
         self.top_scope = _Scope(bindings={}, parent=None)
         self.failed = False
+        # Stack of active FOR-cursor variable rewrites: each entry is (var_name, synthetic_name).
+        # Body hoists check this stack and rewrite qualified `var.col` -> `synthetic.col`.
+        self._for_rewrites: list[tuple[str, str]] = []
+        # Track issued synthetic names to keep them unique within a single normalise call.
+        self._synthetic_names: set[str] = set()
+        self._next_label_label_for_label: str | None = None  # passed from labelled-block dispatch
 
     # ---- low-level cursor helpers ----------------------------------------
 
@@ -228,13 +234,16 @@ class _Walker:
             and nxt.token_type == tokens.TokenType.COLON
         ):
             label_tok = tok
-            # Look-ahead two: must be a block-introducing keyword
             after = self._peek(2)
             if after is not None and _kw(after, "BEGIN", "WHILE", "LOOP", "REPEAT", "FOR"):
-                # Skip "label :" and let the block-introducing dispatch handle the rest
                 self._advance()  # label
                 self._advance()  # ':'
-                self._dispatch_statement(scope)
+                # Pass label down for FOR-cursor synthetic naming (label takes precedence).
+                self._next_label_label_for_label = label_tok.text
+                try:
+                    self._dispatch_statement(scope)
+                finally:
+                    self._next_label_label_for_label = None
                 return
 
         # BEGIN ... END (compound block)
@@ -515,33 +524,118 @@ class _Walker:
             self._dispatch_statement(scope)
         raise _UnbalancedBlock(f"unclosed REPEAT at offset {rep_tok.start}")
 
-    # ---- FOR (cursor loop placeholder for U2; U4 fills in virtual sources)
+    # ---- FOR (cursor virtual source — U4)
 
     def _handle_for(self, scope: _Scope) -> None:
-        """U2: skip past FOR..DO and walk the body so embedded DML is hoisted.
+        """`FOR var AS query DO body END FOR`:
+        - Hoist `CREATE OR REPLACE TEMPORARY VIEW __for_<name>__ AS <query>` so the
+          synthetic source flows through resolve_temp_views to the real underlying tables.
+        - Push a (var, synthetic) rewrite onto the stack so qualified `var.col`
+          references inside the body are rewritten to `__for_<name>__.col` at hoist time.
+        - Walk the body once (no loop semantics — flat data-flow projection).
+        - Pop the rewrite when leaving the FOR scope.
 
-        U4 replaces this with proper cursor-virtual-source handling.
+        `FOR query DO` (no var) is supported but body refs use unqualified columns —
+        documented v1 limitation; no body rewrite is registered.
         """
         for_tok = self._peek()
         self._advance()  # FOR
-        self._consume_until_kw("DO")
-        if not self._eof() and _kw(self._peek(), "DO"):
-            self._advance()
+
+        # Try to parse `var AS` prefix. If not present, treat as anonymous FOR.
+        var_name: str | None = None
+        first = self._peek()
+        if first is not None and first.token_type == tokens.TokenType.VAR:
+            # Cursor-variable form requires AS following the var name
+            if self._peek(1) is not None and (
+                self._peek(1).token_type == tokens.TokenType.ALIAS
+                or _kw(self._peek(1), "AS")
+            ):
+                var_name = first.text
+                self._advance()  # var
+                self._advance()  # AS
+            elif self._peek(1) is not None and _kw(self._peek(1), "AS"):
+                var_name = first.text
+                self._advance()
+                self._advance()
+        # Some Databricks tokenizations expose `row` as ROW token, not VAR
+        elif first is not None and first.token_type == tokens.TokenType.ROW:
+            if self._peek(1) is not None and (
+                self._peek(1).token_type == tokens.TokenType.ALIAS
+                or _kw(self._peek(1), "AS")
+            ):
+                var_name = first.text
+                self._advance()
+                self._advance()
+
+        # Synthetic name: label > var > 'cursor'
+        label = self._next_label_label_for_label
+        base_id = label or var_name or "cursor"
+        synthetic = self._next_synthetic_name(f"__for_{base_id}__")
+
+        # Cursor query starts here, runs until DO (at depth 0)
+        query_start = self._peek()
+        if query_start is None:
+            raise _UnbalancedBlock(f"FOR at offset {for_tok.start} missing query")
+        query_end = query_start
+        depth = 0
         while not self._eof():
             tok = self._peek()
-            if _is_semicolon(tok):
-                self._advance()
-                continue
-            if _kw(tok, "END"):
-                self._advance()
-                if not self._eof() and _kw(self._peek(), "FOR"):
+            if tok.token_type == tokens.TokenType.L_PAREN:
+                depth += 1
+            elif tok.token_type == tokens.TokenType.R_PAREN:
+                depth -= 1
+            if depth == 0 and _kw(tok, "DO"):
+                break
+            query_end = tok
+            self._advance()
+        if self._eof():
+            raise _UnbalancedBlock(f"FOR at offset {for_tok.start} missing DO")
+        # Consume DO
+        self._advance()
+
+        cursor_query = self._slice(query_start, query_end).strip()
+        self.hoisted.append(
+            f"CREATE OR REPLACE TEMPORARY VIEW {synthetic} AS {cursor_query}"
+        )
+        self.virtual_sources.append(VirtualSource(name=synthetic, body_sql=cursor_query))
+
+        if var_name:
+            self._for_rewrites.append((var_name.lower(), synthetic))
+        try:
+            while not self._eof():
+                tok = self._peek()
+                if _is_semicolon(tok):
                     self._advance()
-                # Optional trailing label
-                if not self._eof() and self._peek().token_type == tokens.TokenType.VAR:
+                    continue
+                if _kw(tok, "END"):
                     self._advance()
-                return
-            self._dispatch_statement(scope)
+                    if not self._eof() and _kw(self._peek(), "FOR"):
+                        self._advance()
+                    # Optional trailing label
+                    if not self._eof() and self._peek().token_type == tokens.TokenType.VAR:
+                        self._advance()
+                    return
+                self._dispatch_statement(scope)
+        finally:
+            if var_name:
+                self._for_rewrites.pop()
         raise _UnbalancedBlock(f"unclosed FOR at offset {for_tok.start}")
+
+    def _next_synthetic_name(self, base: str) -> str:
+        if base not in self._synthetic_names:
+            self._synthetic_names.add(base)
+            return base
+        n = 2
+        # base looks like __for_X__ — insert _N before the trailing __
+        while True:
+            if base.endswith("__"):
+                candidate = f"{base[:-2]}_{n}__"
+            else:
+                candidate = f"{base}_{n}"
+            if candidate not in self._synthetic_names:
+                self._synthetic_names.add(candidate)
+                return candidate
+            n += 1
 
     # ---- DECLARE ---------------------------------------------------------
 
@@ -753,7 +847,32 @@ class _Walker:
             self._advance()
         text = self._slice(start_tok, end_tok).strip()
         if text:
+            text = self._apply_for_rewrites(text)
             self.hoisted.append(text)
+
+    def _apply_for_rewrites(self, text: str) -> str:
+        """Rewrite qualified `var.col` references to `__for_<id>__.col` for any
+        active FOR-cursor variables on the rewrite stack.
+
+        Case-insensitive match, word-boundary anchored on the variable name. Inner-
+        most rewrites apply first so nested FOR loops resolve correctly when the
+        outer cursor's variable would otherwise shadow the inner.
+
+        SQL/PSM cursor bodies often have no FROM clause (the cursor variable is
+        implicit). When we rewrite `var.col` -> `synthetic.col` and the resulting
+        statement has no FROM, inject `FROM <synthetic>` so SQLGlot can resolve
+        the column attribution. If a FROM clause exists, leave it alone.
+        """
+        injected_synthetics: list[str] = []
+        for var, synthetic in reversed(self._for_rewrites):
+            pattern = _re.compile(r"\b" + _re.escape(var) + r"\.", _re.IGNORECASE)
+            new_text, n_subs = pattern.subn(f"{synthetic}.", text)
+            text = new_text
+            if n_subs > 0:
+                injected_synthetics.append(synthetic)
+        if injected_synthetics and not _re.search(r"\bfrom\b", text, _re.IGNORECASE):
+            text = text.rstrip() + " FROM " + injected_synthetics[0]
+        return text
 
 
 class _UnbalancedBlock(Exception):
