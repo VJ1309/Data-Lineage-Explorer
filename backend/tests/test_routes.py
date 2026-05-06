@@ -345,3 +345,141 @@ def test_lineage_edges_expose_qualified_field():
     for e in edges:
         assert "qualified" in e, f"edge missing qualified field: {e}"
         assert isinstance(e["qualified"], bool)
+
+
+# ---------------------------------------------------------------------------
+# /tables synthetic flag (U7) — surfaces parser-internal placeholders so the
+# frontend can render them distinctly from real catalog tables.
+# ---------------------------------------------------------------------------
+
+
+def test_tables_endpoint_marks_call_placeholder_as_synthetic():
+    """A CALL to an unresolved procedure produces a __call_<proc>__ placeholder
+    table; /tables must flag it `synthetic: true`."""
+    zip_bytes = _make_zip({
+        "q.sql": "CALL my_catalog.my_schema.run_etl('raw', 'silver')"
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    resp = client.get("/tables")
+    assert resp.status_code == 200
+    by_name = {row["table"]: row for row in resp.json()}
+    name = "__call_my_catalog_my_schema_run_etl__"
+    assert name in by_name, f"missing synthetic CALL table; got {list(by_name)}"
+    assert by_name[name]["synthetic"] is True
+
+
+def test_tables_endpoint_marks_dynamic_sql_placeholder_as_synthetic():
+    """Non-foldable EXECUTE IMMEDIATE produces a __dynamic_sql__ placeholder
+    table; /tables must flag it synthetic."""
+    zip_bytes = _make_zip({
+        "q.sql": "BEGIN EXECUTE IMMEDIATE current_query(); END",
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    by_name = {row["table"]: row for row in client.get("/tables").json()}
+    assert "__dynamic_sql__" in by_name, f"missing __dynamic_sql__; got {list(by_name)}"
+    assert by_name["__dynamic_sql__"]["synthetic"] is True
+
+
+def test_tables_endpoint_real_tables_not_synthetic():
+    """Regression: real catalog tables continue to set synthetic=False."""
+    zip_bytes = _make_zip({
+        "q.sql": "INSERT INTO target SELECT amount FROM raw_orders"
+    })
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    rows = client.get("/tables").json()
+    by_name = {row["table"]: row for row in rows}
+    assert by_name["raw_orders"]["synthetic"] is False
+    assert by_name["target"]["synthetic"] is False
+
+
+def test_tables_endpoint_excludes_collapsed_for_cursor_view():
+    """A FOR cursor's __for_<id>__ synthetic temp view is collapsed by
+    resolve_temp_views — it must not appear in /tables at all (real source
+    tables take its place)."""
+    sql = """
+    BEGIN
+      FOR row AS SELECT order_id, amount FROM orders DO
+        INSERT INTO summary SELECT row.order_id, row.amount;
+      END FOR;
+    END
+    """
+    zip_bytes = _make_zip({"q.sql": sql})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    table_names = {row["table"] for row in client.get("/tables").json()}
+    assert not any(t.startswith("__for_") for t in table_names), (
+        f"__for_*__ leaked into /tables: {sorted(table_names)}"
+    )
+    # Real source tables present, end-to-end lineage holds
+    assert "orders" in table_names
+    assert "summary" in table_names
+
+
+# ---------------------------------------------------------------------------
+# Warning fidelity (R4) — procedural files no longer produce a wholesale
+# file-level "Unexpected token" warning. Per-statement warnings only fire
+# for genuinely unparseable embedded statements.
+# ---------------------------------------------------------------------------
+
+
+def test_warning_fidelity_procedural_file_no_unexpected_token():
+    """A BEGIN…END block with valid embedded DML must not produce an
+    'Unexpected token' file-level warning. Pre-U2 this would emit one such
+    warning and zero edges; now it produces edges and zero warnings."""
+    sql = """
+    BEGIN
+      DECLARE v STRING DEFAULT 'unused';
+      INSERT INTO target SELECT amount FROM raw_orders;
+    END
+    """
+    zip_bytes = _make_zip({"proc.sql": sql})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    warnings = client.get("/warnings").json()
+    proc_warnings = [w for w in warnings if w.get("file") == "proc.sql"]
+    assert not any("Unexpected token" in w["error"] for w in proc_warnings), (
+        f"file-level Unexpected token warning leaked: {proc_warnings}"
+    )
+
+    # End-to-end edge survived
+    resp = client.get(
+        "/lineage", params={"table": "target", "column": "amount"}
+    )
+    assert resp.status_code == 200
+    upstream = resp.json()["upstream"]
+    assert any(
+        e["source_col"].startswith("raw_orders.") for e in upstream
+    ), f"expected raw_orders upstream of target.amount; got {upstream}"

@@ -166,6 +166,17 @@ def refresh_source(source_id: str):
 
 # ── Tables / Columns ─────────────────────────────────────────────────────────
 
+def _is_synthetic_table(name: str) -> bool:
+    """True for parser-internal placeholder tables (CALL/dynamic-SQL/FOR cursor/
+    file source / unresolved subquery aliases). Convention: surrounded by `__`.
+
+    Frontend renders these distinctly so users can tell parser-synthesised nodes
+    from real catalog tables. Backed by the synthetic prefix conventions
+    documented in `parsers/sql_script.py`.
+    """
+    return name.startswith("__") and name.endswith("__")
+
+
 @router.get("/tables")
 def list_tables():
     tables: dict[str, int] = {}
@@ -195,7 +206,12 @@ def list_tables():
             role = "target"         # only written to (final output)
         else:
             role = "source"         # only read from (external source)
-        result.append({"table": t, "column_count": c, "role": role})
+        result.append({
+            "table": t,
+            "column_count": c,
+            "role": role,
+            "synthetic": _is_synthetic_table(t),
+        })
     return result
 
 
