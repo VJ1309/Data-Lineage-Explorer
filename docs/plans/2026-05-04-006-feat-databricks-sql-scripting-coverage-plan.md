@@ -1,7 +1,7 @@
 ---
 title: "feat: Databricks SQL scripting coverage in parsers/sql.py"
 type: feat
-status: active
+status: completed
 date: 2026-05-04
 origin: docs/brainstorms/2026-05-04-databricks-sql-scripting-coverage-requirements.md
 ---
