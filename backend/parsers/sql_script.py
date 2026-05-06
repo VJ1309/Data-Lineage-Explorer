@@ -333,6 +333,15 @@ class _Walker:
             self._consume_until_terminator()
             return
 
+        # EXECUTE IMMEDIATE expr [INTO ...] [USING ...] — fold + hoist (U6).
+        # SQLGlot tokenizes EXECUTE as a COMMAND-style trigger; the rest of the
+        # statement (including the IMMEDIATE keyword and the entire payload) lands
+        # in a single STRING token. We re-tokenize the payload to fold against
+        # the in-scope variable bindings.
+        if tok.token_type == tokens.TokenType.EXECUTE or _kw(tok, "EXECUTE"):
+            self._handle_execute_immediate(scope)
+            return
+
         # CALL <proc>(args) — placeholder synthesis (U5).
         # SQLGlot tokenizes CALL as COMMAND, sweeping the rest of the statement into
         # a single STRING token. We match the COMMAND token type explicitly because
@@ -855,6 +864,126 @@ class _Walker:
         )
         self.warnings.append(
             f"Unresolved CALL to {qname}; cross-file body resolution deferred to v2"
+        )
+
+    # ---- EXECUTE IMMEDIATE (U6) -----------------------------------------
+
+    def _handle_execute_immediate(self, scope: _Scope) -> None:
+        """EXECUTE IMMEDIATE expr [INTO ...] [USING ...] — fold + hoist or placeholder.
+
+        SQLGlot's databricks tokenizer behaves two ways depending on context:
+
+        1. **Top-level EXECUTE** (no surrounding BEGIN): collapses the entire body
+           after EXECUTE into one synthetic STRING token whose `text` field carries
+           the verbatim payload (including the `IMMEDIATE` keyword and any
+           USING/INTO clauses). Re-tokenise the payload to recover the expression.
+        2. **Inside a BEGIN block**: emits individual tokens — `VAR(IMMEDIATE)`,
+           STRING/DPIPE/VAR for the expression, then `INTO`/`USING` token-type
+           markers, terminated by `;`. Walk these directly.
+
+        After collecting the expression tokens we drop USING/INTO (parameter
+        substitution deferred per origin) and try literal folding against the
+        in-scope binding map.
+
+        - Folded to a string literal → unwrap quotes and hoist the inner SQL as a
+          top-level statement (it flows through the normal parse pipeline; if it's
+          itself malformed, a per-statement parse warning surfaces naturally).
+        - Anything else → emit `__dynamic_sql__` placeholder + per-statement warning.
+        """
+        self._advance()  # EXECUTE
+        next_tok = self._peek()
+        if next_tok is None:
+            self._emit_dynamic_sql_placeholder()
+            return
+
+        # Path 1: COMMAND-style payload collapse (top-level EXECUTE)
+        if (
+            next_tok.token_type == tokens.TokenType.STRING
+            and (next_tok.text or "").lstrip()[:9].upper() == "IMMEDIATE"
+        ):
+            payload = next_tok.text or ""
+            self._advance()
+            stripped = payload.lstrip()
+            if stripped[:9].upper() == "IMMEDIATE":
+                rest = stripped[9:]
+                if not rest or rest[0].isspace() or rest[0] in "(":
+                    payload = rest.lstrip()
+            expr_toks = _tokens(payload)
+        else:
+            # Path 2: individual tokens (inside BEGIN). Consume optional IMMEDIATE,
+            # then collect expression tokens until ';' or end-of-block.
+            if _kw(next_tok, "IMMEDIATE"):
+                self._advance()
+            expr_toks: list = []
+            depth = 0
+            while not self._eof():
+                t = self._peek()
+                if t.token_type == tokens.TokenType.L_PAREN:
+                    depth += 1
+                elif t.token_type == tokens.TokenType.R_PAREN:
+                    depth -= 1
+                if depth == 0:
+                    if _is_semicolon(t):
+                        break
+                    if _kw(t, "END", "ELSEIF", "ELSE", "WHEN", "UNTIL"):
+                        break
+                expr_toks.append(t)
+                self._advance()
+
+        if not expr_toks:
+            self._emit_dynamic_sql_placeholder()
+            return
+
+        # Truncate at the first INTO/USING at depth 0 (outside parens).
+        cut = len(expr_toks)
+        depth = 0
+        for idx, t in enumerate(expr_toks):
+            if t.token_type == tokens.TokenType.L_PAREN:
+                depth += 1
+                continue
+            if t.token_type == tokens.TokenType.R_PAREN:
+                depth -= 1
+                continue
+            if depth == 0 and (
+                t.token_type in (tokens.TokenType.INTO, tokens.TokenType.USING)
+                or _kw(t, "INTO", "USING")
+            ):
+                cut = idx
+                break
+        expr_toks = expr_toks[:cut]
+        if not expr_toks:
+            self._emit_dynamic_sql_placeholder()
+            return
+
+        folded = _fold_literal_expression(expr_toks, scope)
+        if (
+            folded is None
+            or len(folded) < 2
+            or not (folded.startswith("'") and folded.endswith("'"))
+        ):
+            self._emit_dynamic_sql_placeholder()
+            return
+
+        # Strip outer quotes; the inner string is the SQL to re-parse.
+        inner_sql = folded[1:-1]
+        if not inner_sql.strip():
+            self._emit_dynamic_sql_placeholder()
+            return
+        self.hoisted.append(inner_sql)
+
+    def _emit_dynamic_sql_placeholder(self) -> None:
+        """Hoist a `__dynamic_sql__` self-edge placeholder + per-statement warning.
+
+        Mirrors the U5 CALL placeholder shape; flows through the existing parser
+        pipeline as an approximate wildcard edge via `_downgrade_placeholder_edge`.
+        """
+        synthetic = "__dynamic_sql__"
+        self._synthetic_names.add(synthetic)
+        self.hoisted.append(
+            f"INSERT INTO {synthetic} SELECT * FROM {synthetic}"
+        )
+        self.warnings.append(
+            "Non-foldable EXECUTE IMMEDIATE; lineage incomplete"
         )
 
     def _next_synthetic_name(self, base: str) -> str:

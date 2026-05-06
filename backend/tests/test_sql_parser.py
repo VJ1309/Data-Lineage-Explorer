@@ -1824,6 +1824,162 @@ def test_drop_describe_show_procedure_silently_skipped():
     ), f"silent-skip leaked a warning: {result.warnings}"
 
 
+# ---------------------------------------------------------------------------
+# EXECUTE IMMEDIATE — folding + dynamic-SQL placeholder (U6)
+# ---------------------------------------------------------------------------
+
+
+def test_execute_immediate_constant_string_resolves_to_real_edges():
+    sql = "EXECUTE IMMEDIATE 'INSERT INTO t SELECT a FROM s'"
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    edges = result.edges
+    assert any(
+        e.source_col == "s.a" and e.target_col == "t.a" for e in edges
+    ), f"missing edge s.a -> t.a; edges={[(e.source_col, e.target_col) for e in edges]}"
+    assert not any("__dynamic_sql__" in e.source_col or "__dynamic_sql__" in e.target_col
+                   for e in edges)
+    assert not any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_truncate_insert_chain_folds_to_real_edges():
+    """Origin SC3: parameterised TRUNCATE / INSERT chain over a bound DECLARE."""
+    sql = """
+    BEGIN
+      DECLARE table_name STRING DEFAULT 'my_catalog.my_schema.staging';
+      EXECUTE IMMEDIATE 'TRUNCATE TABLE ' || table_name;
+      EXECUTE IMMEDIATE 'INSERT INTO ' || table_name || ' SELECT * FROM source';
+    END
+    """
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    edges = result.edges
+    sources = {e.source_col for e in edges}
+    targets = {e.target_col for e in edges}
+    # Real edges from `source` to the resolved target
+    assert any(s.startswith("source.") for s in sources), sources
+    assert any(t.startswith("my_catalog.my_schema.staging.") for t in targets), targets
+    # No dynamic-SQL placeholder leaked
+    assert not any(
+        "__dynamic_sql__" in e.source_col or "__dynamic_sql__" in e.target_col
+        for e in edges
+    )
+    # No fold-time warning
+    assert not any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_recursively_folded_var():
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'sch';
+      DECLARE t STRING DEFAULT p || '.tbl';
+      EXECUTE IMMEDIATE 'INSERT INTO ' || t || ' SELECT a FROM s';
+    END
+    """
+    edges = parse_sql(sql, source_file="ei.sql", source_line=1).edges
+    assert any(
+        e.source_col == "s.a" and e.target_col == "sch.tbl.a" for e in edges
+    ), f"missing edge s.a -> sch.tbl.a; got {[(e.source_col, e.target_col) for e in edges]}"
+
+
+def test_execute_immediate_non_foldable_emits_dynamic_sql_placeholder():
+    """Function call as the dynamic-SQL expression cannot be folded — must degrade
+    to a single approximate self-edge plus exactly one per-statement warning."""
+    sql = "BEGIN EXECUTE IMMEDIATE current_query(); END"
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    placeholder = [
+        e for e in result.edges
+        if e.source_col == "__dynamic_sql__.*" and e.target_col == "__dynamic_sql__.*"
+    ]
+    assert len(placeholder) == 1, (
+        f"expected exactly one __dynamic_sql__ self-edge; got {result.edges}"
+    )
+    assert all(e.confidence == "approximate" for e in placeholder)
+    warnings = [w for w in result.warnings if "Non-foldable EXECUTE IMMEDIATE" in w]
+    assert len(warnings) == 1, f"expected one warning; got {result.warnings}"
+
+
+def test_execute_immediate_unbound_variable_emits_placeholder():
+    sql = (
+        "BEGIN DECLARE x STRING; "
+        "EXECUTE IMMEDIATE 'INSERT INTO ' || x || ' SELECT * FROM s'; END"
+    )
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    assert any(
+        e.source_col == "__dynamic_sql__.*" and e.target_col == "__dynamic_sql__.*"
+        for e in result.edges
+    )
+    assert any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_set_clears_binding_then_placeholder():
+    """SET with a non-literal RHS must clear any prior literal binding so subsequent
+    folds defensively fall through to the placeholder rather than reusing stale data."""
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'foo';
+      SET p = (SELECT name FROM t LIMIT 1);
+      EXECUTE IMMEDIATE 'INSERT INTO ' || p || ' SELECT * FROM s';
+    END
+    """
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    assert any(
+        e.source_col == "__dynamic_sql__.*" and e.target_col == "__dynamic_sql__.*"
+        for e in result.edges
+    )
+    assert any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_inside_for_loop_uses_outer_binding():
+    """Bindings declared above a FOR loop are visible to EXECUTE IMMEDIATE in its
+    body. Verifies scope traversal across nested handlers."""
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'tgt_table';
+      FOR row AS SELECT a FROM s DO
+        EXECUTE IMMEDIATE 'INSERT INTO ' || p || ' SELECT b FROM other_src';
+      END FOR;
+    END
+    """
+    edges = parse_sql(sql, source_file="ei.sql", source_line=1).edges
+    targets = {e.target_col for e in edges}
+    sources = {e.source_col for e in edges}
+    assert any(t.startswith("tgt_table.") for t in targets), targets
+    assert "other_src.b" in sources, sources
+    assert not any("__dynamic_sql__" in t for t in targets)
+
+
+def test_execute_immediate_using_clause_dropped_skeleton_parses():
+    """USING parameter substitution is deferred; the static SQL skeleton survives
+    and parses (USING bindings do not contribute spurious edges)."""
+    sql = (
+        "BEGIN EXECUTE IMMEDIATE "
+        "'SELECT SUM(c1) FROM VALUES(?), (?) AS t(c1)' USING 5, 6; END"
+    )
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    # No dynamic-SQL placeholder — the static skeleton folds to a literal
+    assert not any(
+        "__dynamic_sql__" in e.source_col or "__dynamic_sql__" in e.target_col
+        for e in result.edges
+    )
+    assert not any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_folded_sql_malformed_surfaces_parse_warning():
+    """Folded successfully but the resulting SQL is itself unparseable — a normal
+    per-statement parse warning surfaces; no edges; no fold-time placeholder."""
+    sql = (
+        "BEGIN DECLARE x STRING DEFAULT 'INSERT INTO FROM WHERE'; "
+        "EXECUTE IMMEDIATE x; END"
+    )
+    result = parse_sql(sql, source_file="ei.sql", source_line=1)
+    # No edges (SQLGlot parses the gibberish but no source/target attribution)
+    assert not any(
+        e.source_col == "__dynamic_sql__.*" or e.target_col == "__dynamic_sql__.*"
+        for e in result.edges
+    ), f"placeholder leaked despite folding success: {result.edges}"
+    # The warning (if any) is the SQLGlot parse error, not the fold-time placeholder
+    assert not any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
 def test_recursive_cte_mixed_with_non_recursive_cte():
     """WITH RECURSIVE may declare a mix: only the self-referencing CTE is treated as
     recursive; the non-recursive one resolves with the standard logic."""

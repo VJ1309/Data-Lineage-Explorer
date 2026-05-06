@@ -549,3 +549,139 @@ def test_show_procedures_silently_skipped():
     flat, _, _ = normalize_script(sql)
     assert "SHOW PROCEDURES" not in flat
     assert "INSERT INTO t" in flat
+
+
+# ---------------------------------------------------------------------------
+# EXECUTE IMMEDIATE — constant folding + dynamic-SQL placeholder (U6)
+# ---------------------------------------------------------------------------
+
+
+def test_execute_immediate_constant_string_hoists_inner_sql():
+    sql = "EXECUTE IMMEDIATE 'INSERT INTO t SELECT a FROM s'"
+    result = normalize_script(sql)
+    assert "INSERT INTO t SELECT a FROM s" in result.flat_sql
+    assert result.warnings == []
+    assert "__dynamic_sql__" not in result.flat_sql
+
+
+def test_execute_immediate_concat_chain_folds_against_binding():
+    """Origin SC3: TRUNCATE/INSERT chain over a bound table_name DECLARE."""
+    sql = """
+    BEGIN
+      DECLARE table_name STRING DEFAULT 'my_catalog.my_schema.staging';
+      EXECUTE IMMEDIATE 'TRUNCATE TABLE ' || table_name;
+      EXECUTE IMMEDIATE 'INSERT INTO ' || table_name || ' SELECT * FROM source';
+    END
+    """
+    result = normalize_script(sql)
+    assert "TRUNCATE TABLE my_catalog.my_schema.staging" in result.flat_sql
+    assert (
+        "INSERT INTO my_catalog.my_schema.staging SELECT * FROM source"
+        in result.flat_sql
+    )
+    assert result.warnings == []
+    assert "__dynamic_sql__" not in result.flat_sql
+
+
+def test_execute_immediate_recursively_folded_var():
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'sch';
+      DECLARE t STRING DEFAULT p || '.tbl';
+      EXECUTE IMMEDIATE 'INSERT INTO ' || t || ' SELECT a FROM s';
+    END
+    """
+    result = normalize_script(sql)
+    assert "INSERT INTO sch.tbl SELECT a FROM s" in result.flat_sql
+    assert result.warnings == []
+
+
+def test_execute_immediate_using_clause_dropped():
+    """USING clause is parameter substitution; deferred per origin."""
+    sql = (
+        "BEGIN EXECUTE IMMEDIATE "
+        "'SELECT SUM(c1) FROM VALUES(?), (?) AS t(c1)' USING 5, 6; END"
+    )
+    flat, _, _ = normalize_script(sql)
+    assert "SELECT SUM(c1) FROM VALUES" in flat
+    assert "USING" not in flat.upper()
+    # The static skeleton survived; placeholders pass through as-is.
+    assert "__dynamic_sql__" not in flat
+
+
+def test_execute_immediate_into_clause_dropped():
+    sql = "BEGIN EXECUTE IMMEDIATE 'SELECT col FROM t' INTO var1; END"
+    flat, _, _ = normalize_script(sql)
+    assert "SELECT col FROM t" in flat
+    # INTO clause should be dropped, not surface in the hoisted SQL
+    assert "INTO var1" not in flat
+
+
+def test_execute_immediate_non_foldable_function_call_emits_placeholder():
+    """current_query() is a function call, not foldable. Must degrade to placeholder."""
+    sql = "BEGIN EXECUTE IMMEDIATE current_query(); END"
+    result = normalize_script(sql)
+    assert "__dynamic_sql__" in result.flat_sql
+    assert "INSERT INTO __dynamic_sql__ SELECT * FROM __dynamic_sql__" in result.flat_sql
+    assert any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_unbound_variable_emits_placeholder():
+    sql = (
+        "BEGIN DECLARE x STRING; "
+        "EXECUTE IMMEDIATE 'INSERT INTO ' || x || ' SELECT * FROM s'; END"
+    )
+    result = normalize_script(sql)
+    assert "__dynamic_sql__" in result.flat_sql
+    assert any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_set_clears_binding_then_placeholder():
+    """SET with non-literal RHS must clear any prior literal binding."""
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'foo';
+      SET p = (SELECT name FROM t LIMIT 1);
+      EXECUTE IMMEDIATE 'INSERT INTO ' || p || ' SELECT * FROM s';
+    END
+    """
+    result = normalize_script(sql)
+    assert "__dynamic_sql__" in result.flat_sql
+    assert any("Non-foldable EXECUTE IMMEDIATE" in w for w in result.warnings)
+
+
+def test_execute_immediate_inside_for_loop_sees_outer_binding():
+    """Bindings declared above a FOR loop are visible inside its body."""
+    sql = """
+    BEGIN
+      DECLARE p STRING DEFAULT 'tgt_table';
+      FOR row AS SELECT a FROM s DO
+        EXECUTE IMMEDIATE 'INSERT INTO ' || p || ' SELECT 1';
+      END FOR;
+    END
+    """
+    result = normalize_script(sql)
+    assert "INSERT INTO tgt_table SELECT 1" in result.flat_sql
+    assert result.warnings == []
+
+
+def test_execute_immediate_folded_sql_itself_malformed():
+    """Folding succeeds but the result is not parseable SQL — surface as a parse
+    warning during the per-statement parse, not as a fold-time placeholder."""
+    sql = "BEGIN DECLARE x STRING DEFAULT 'NOT VALID SQL'; EXECUTE IMMEDIATE x; END"
+    result = normalize_script(sql)
+    # The folded text is hoisted as-is; downstream parse_sql produces a normal
+    # per-statement parse warning. Normaliser itself emits no dynamic-SQL warning.
+    assert "NOT VALID SQL" in result.flat_sql
+    assert "__dynamic_sql__" not in result.flat_sql
+    assert result.warnings == []
+
+
+def test_execute_immediate_top_level_no_begin_wrapper():
+    """Top-level EXECUTE IMMEDIATE (outside BEGIN) takes the COMMAND-collapse path
+    where SQLGlot returns the entire body in one synthetic STRING token."""
+    sql = "EXECUTE IMMEDIATE 'INSERT INTO t SELECT a FROM s' INTO var USING 5"
+    result = normalize_script(sql)
+    assert "INSERT INTO t SELECT a FROM s" in result.flat_sql
+    assert "USING" not in result.flat_sql.upper()
+    assert "INTO var" not in result.flat_sql
