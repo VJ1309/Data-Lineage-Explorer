@@ -38,6 +38,8 @@ Three architecture violations were found during a review of the Transform tab PR
 - `engine.upstream(graph, col_id)` — called by `GET /lineage`
 - `engine.downstream(graph, col_id)` — called by `GET /lineage` and `GET /impact`
 - `engine.trace_paths(raw_graph, col_id)` — called by `GET /lineage/paths`
+- `engine.column_metadata(graph, table)` — called by `GET /tables/{table}/columns`
+- `engine.lineage_trace(graph, raw_graph, table, column)` — called by `GET /lineage/trace`. Returns typed `TraceStep` dataclasses; route reshapes via `_trace_step_to_dict` (no `dataclasses.asdict()` — see the `architecture-patterns/backend-parser-state-refactor-patterns-2026-05-01.md` §4 footgun).
 
 **Wrong (route layer owns traversal):**
 ```python
@@ -177,7 +179,7 @@ function invalidateLineageData(qc: ReturnType<typeof useQueryClient>) {
 
 ## Examples
 
-See `backend/lineage/engine.py` for canonical engine-layer traversal functions (`upstream`, `downstream`, `trace_paths`). See `backend/api/routes.py` for the `_remove_source_files` helper and the correct route-handler shape (thin dispatch + response shaping only).
+See `backend/lineage/engine.py` for canonical engine-layer traversal functions (`upstream`, `downstream`, `trace_paths`, `column_metadata`, `lineage_trace`). See `backend/api/routes.py` for the `_remove_source_files` helper and the correct route-handler shape (thin dispatch + response shaping only).
 
 ## Related
 

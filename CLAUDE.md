@@ -39,6 +39,8 @@ Dependencies are managed with `uv` (lockfile at `uv.lock`). The venv is at `../.
 2. `lineage/engine.py` — calls `_parse_file()` per record (dispatches to SQL/PySpark/notebook parser), collects all `LineageEdge` objects, runs `_normalize_edges()` (lowercase + suffix-match short table names to full `catalog.schema.table` form), builds NetworkX DAG
 3. `api/routes.py` — REST endpoints query the DAG using `engine.upstream()` / `engine.downstream()` (BFS)
 
+**Lineage Trace:** `engine.lineage_trace()` walks `raw_graph` from a column's writer edges, groups by source-table boundary into `TraceStep`s, attaches sibling `__filter__` / `__joinkey__` edges that target the writer's table, and rolls up predicates from collapsed temp views (named in `via_temp_views`). Surfaced via `GET /lineage/trace?table=X&column=Y` and rendered in the column inspector tree.
+
 **Parsers:**
 - `parsers/sql.py` — SQLGlot AST, `dialect="databricks"`. Handles multi-statement SQL, schema/catalog-qualified names, CTEs, window functions, temp view resolution. Detects Databricks `.sql` notebook format (`-- COMMAND ----------` separators). `parse_sql()` accepts `_resolve_views=False` for sub-calls from notebook parsers (resolution happens at notebook level).
 - `parsers/pyspark.py` — Python `ast` module. Tracks DataFrame variable assignments through `.select()`, `.withColumn()`, `.join()`, `.agg()`, etc. Handles `spark.sql()` calls and Databricks `.py` notebook format (`# COMMAND ----------` / `# MAGIC %sql`).
@@ -83,3 +85,7 @@ npm run lint     # ESLint
 
 - **Backend (Railway):** Auto-deploys from `master`. In-memory state — all uploaded data is lost on redeploy. Users must re-upload after each deployment.
 - **Frontend (Vercel):** Auto-deploys from `master`. Set `API_URL=https://<railway-url>` in Vercel environment variables (without trailing slash).
+
+## Do Not
+- Commit without running typecheck and tests
+- Store secrets in code (use environment variables)
