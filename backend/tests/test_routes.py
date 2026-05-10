@@ -483,3 +483,108 @@ def test_warning_fidelity_procedural_file_no_unexpected_token():
     assert any(
         e["source_col"].startswith("raw_orders.") for e in upstream
     ), f"expected raw_orders upstream of target.amount; got {upstream}"
+
+
+# ---------------------------------------------------------------------------
+# /lineage/trace — Lineage Trace endpoint
+# ---------------------------------------------------------------------------
+
+
+def _setup_with_files(files: dict[str, str]) -> str:
+    zip_bytes = _make_zip(files)
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+    return source_id
+
+
+def test_lineage_trace_happy_path_with_filter():
+    _setup_with_files({
+        "agg.sql": (
+            "INSERT INTO agg_revenue\n"
+            "SELECT customer_id, SUM(amount) AS total_revenue\n"
+            "FROM raw_orders WHERE status = 'completed' GROUP BY customer_id"
+        )
+    })
+    resp = client.get(
+        "/lineage/trace",
+        params={"table": "agg_revenue", "column": "total_revenue"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["target"] == "agg_revenue.total_revenue"
+    assert len(body["steps"]) == 1
+    s = body["steps"][0]
+    assert set(s.keys()) == {
+        "kind", "source_file", "source_cell", "source_line", "target_table",
+        "writes", "filters", "joins", "via_temp_views", "upstream_columns",
+    }
+    assert s["target_table"] == "agg_revenue"
+    assert s["kind"] == "sql"
+    assert len(s["filters"]) == 1
+    assert s["filters"][0]["kind"] == "where"
+    assert "raw_orders.status" in s["filters"][0]["source_columns"]
+    assert s["upstream_columns"] == ["raw_orders.amount"]
+
+
+def test_lineage_trace_unknown_column_returns_404():
+    _setup_with_files({"q.sql": "SELECT amount FROM raw_orders"})
+    resp = client.get(
+        "/lineage/trace",
+        params={"table": "no_table", "column": "no_col"},
+    )
+    assert resp.status_code == 404
+    assert "no_table.no_col" in resp.json()["detail"]
+
+
+def test_lineage_trace_source_column_returns_empty_steps():
+    _setup_with_files({
+        "agg.sql": "INSERT INTO mart SELECT amount FROM raw_orders",
+    })
+    # raw_orders.amount IS in the resolved graph but has no writers — empty steps.
+    resp = client.get(
+        "/lineage/trace",
+        params={"table": "raw_orders", "column": "amount"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["target"] == "raw_orders.amount"
+    assert body["steps"] == []
+
+
+def test_lineage_trace_existing_endpoints_do_not_leak_trace_fields():
+    """Targeted assertion: Trace-only field names must not appear in the JSON
+    bodies of the unchanged endpoints. Smaller and more durable than full-body
+    snapshots which trip on incidental ordering changes."""
+    _setup_with_files({
+        "q.sql": (
+            "INSERT INTO target\n"
+            "SELECT customer_id, amount FROM raw_orders WHERE status = 'paid'"
+        )
+    })
+    trace_only_fields = {
+        "via_temp_views",
+        "target_table",
+    }
+    endpoints = [
+        ("/tables", {}),
+        ("/tables/target/columns", {}),
+        ("/lineage", {"table": "target", "column": "amount"}),
+        ("/lineage/paths", {"table": "target", "column": "amount"}),
+        ("/impact", {"table": "raw_orders", "column": "amount"}),
+        ("/search", {"q": "amount"}),
+        ("/warnings", {}),
+    ]
+    import json as _json
+    for url, params in endpoints:
+        resp = client.get(url, params=params)
+        assert resp.status_code == 200, f"{url} returned {resp.status_code}"
+        body = _json.dumps(resp.json())
+        for field in trace_only_fields:
+            assert field not in body, (
+                f"trace-only field {field!r} leaked into {url} response: {body[:200]}"
+            )

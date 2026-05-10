@@ -8,6 +8,7 @@ from lineage.engine import column_metadata as engine_column_metadata
 from lineage.engine import upstream as engine_upstream
 from lineage.engine import downstream as engine_downstream
 from lineage.engine import trace_paths as engine_trace_paths
+from lineage.engine import lineage_trace as engine_lineage_trace
 from lineage.ids import split_column_id
 from lineage.models import ParseWarning
 from ingestion.upload import ingest_zip
@@ -268,6 +269,56 @@ def get_impact(table: str, column: str):
         "source": col_id,
         "downstream": [_edge_to_dict(e) for e in down],
         "affected_count": len({e.target_col for e in down}),
+    }
+
+
+def _trace_step_to_dict(step) -> dict:
+    return {
+        "kind": step.kind,
+        "source_file": step.source_file,
+        "source_cell": step.source_cell,
+        "source_line": step.source_line,
+        "target_table": step.target_table,
+        "writes": [
+            {
+                "column_id": w.column_id,
+                "expression": w.expression,
+                "transform_type": w.transform_type,
+                "source_line": w.source_line,
+            }
+            for w in step.writes
+        ],
+        "filters": [
+            {
+                "kind": f.kind,
+                "expression": f.expression,
+                "source_columns": f.source_columns,
+                "source_line": f.source_line,
+            }
+            for f in step.filters
+        ],
+        "joins": [
+            {
+                "expression": j.expression,
+                "source_columns": j.source_columns,
+                "source_line": j.source_line,
+            }
+            for j in step.joins
+        ],
+        "via_temp_views": step.via_temp_views,
+        "upstream_columns": step.upstream_columns,
+    }
+
+
+@router.get("/lineage/trace")
+def get_lineage_trace(table: str, column: str):
+    col_id = f"{table}.{column}"
+    if col_id not in state.lineage_graph:
+        raise HTTPException(status_code=404, detail=f"Column '{col_id}' not found")
+    steps = engine_lineage_trace(state.lineage_graph, state.raw_graph, table, column)
+    return {
+        "target": col_id,
+        "steps": [_trace_step_to_dict(s) for s in steps],
     }
 
 
