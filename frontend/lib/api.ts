@@ -111,6 +111,44 @@ export type PathsResponse = {
   truncated: boolean;
 };
 
+export type TraceStepWrite = {
+  column_id: string;
+  expression: string | null;
+  transform_type: string;
+  source_line: number | null;
+};
+
+export type TraceStepPredicate = {
+  kind: "where" | "having" | "qualify";
+  expression: string | null;
+  source_columns: string[];
+  source_line: number | null;
+};
+
+export type TraceStepJoin = {
+  expression: string | null;
+  source_columns: string[];
+  source_line: number | null;
+};
+
+export type TraceStep = {
+  kind: "sql" | "pyspark";
+  source_file: string;
+  source_cell: number | null;
+  source_line: number | null;
+  target_table: string;
+  writes: TraceStepWrite[];
+  filters: TraceStepPredicate[];
+  joins: TraceStepJoin[];
+  via_temp_views: string[];
+  upstream_columns: string[];
+};
+
+export type LineageTraceResponse = {
+  target: string;
+  steps: TraceStep[];
+};
+
 // ── API functions ─────────────────────────────────────────────────────────
 
 export const api = {
@@ -156,4 +194,8 @@ export const api = {
   search: (q: string) =>
     apiFetch<SearchResult[]>(`/search?q=${encodeURIComponent(q)}`),
   warnings: () => apiFetch<Warning[]>("/warnings"),
+  lineageTrace: (table: string, column: string) =>
+    apiFetch<LineageTraceResponse>(
+      `/lineage/trace?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`
+    ),
 };

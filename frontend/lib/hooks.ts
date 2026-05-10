@@ -11,6 +11,7 @@ function invalidateLineageData(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["impact"] });
   qc.invalidateQueries({ queryKey: ["search"] });
   qc.invalidateQueries({ queryKey: ["warnings"] });
+  qc.invalidateQueries({ queryKey: ["lineage-trace"] });
 }
 
 export function useSources() {
@@ -95,5 +96,13 @@ export function useSearch(q: string) {
     queryFn: () => api.search(q),
     enabled: q.length >= 2,
     staleTime: 10_000,
+  });
+}
+
+export function useLineageTrace(table: string | null, column: string | null) {
+  return useQuery({
+    queryKey: ["lineage-trace", table, column],
+    queryFn: () => api.lineageTrace(table!, column!),
+    enabled: table !== null && column !== null,
   });
 }

@@ -3,6 +3,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { GitBranch } from "lucide-react";
 import { TransformBadge } from "./transform-badge";
+import { LineageTrace } from "./lineage-trace";
 import type { LineageEdge } from "@/lib/api";
 import { splitColumnId } from "@/lib/utils";
 
@@ -156,6 +157,14 @@ export function ColumnInspector({
                 );
               })}
             </div>
+          </section>
+
+          {/* Lineage Trace */}
+          <section className="space-y-2.5">
+            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              Lineage Trace
+            </p>
+            <LineageTrace colId={colId} />
           </section>
         </>
       )}
