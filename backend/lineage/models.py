@@ -49,6 +49,56 @@ class ColumnMeta:
 
 
 @dataclass
+class TraceStepWrite:
+    """One real-column write inside a Trace Step."""
+    column_id: str
+    expression: str | None
+    transform_type: str
+    source_line: int | None
+
+
+@dataclass
+class TraceStepPredicate:
+    """One WHERE / HAVING / QUALIFY predicate inside a Trace Step."""
+    kind: Literal["where", "having", "qualify"]
+    expression: str | None
+    source_columns: list[str]
+    source_line: int | None
+
+
+@dataclass
+class TraceStepJoin:
+    """One JOIN ON clause inside a Trace Step."""
+    expression: str | None
+    source_columns: list[str]
+    source_line: int | None
+
+
+@dataclass
+class TraceStep:
+    """One source-table-bounded step of a Lineage Trace.
+
+    Returned by engine.lineage_trace(). Groups the writes that landed on the
+    inspected column from a single source-table-and-file boundary, plus the
+    filter / join predicates that constrained those writes — including
+    predicates rolled up from collapsed temp views (named in via_temp_views).
+    Routes reshape this into JSON via api/routes.py::_trace_step_to_dict; never
+    via dataclasses.asdict (per the documented backend-parser-state-refactor
+    pattern).
+    """
+    kind: Literal["sql", "pyspark"]
+    source_file: str
+    source_cell: int | None
+    source_line: int | None
+    target_table: str
+    writes: list[TraceStepWrite] = field(default_factory=list)
+    filters: list[TraceStepPredicate] = field(default_factory=list)
+    joins: list[TraceStepJoin] = field(default_factory=list)
+    via_temp_views: list[str] = field(default_factory=list)
+    upstream_columns: list[str] = field(default_factory=list)
+
+
+@dataclass
 class LineageEdge:
     source_col: str
     target_col: str

@@ -1,8 +1,21 @@
 """Lineage engine: builds and queries a NetworkX DAG from FileRecords."""
 from __future__ import annotations
+import os
+from typing import Literal
 import networkx as nx
 from lineage.ids import split_column_id
-from lineage.models import ColumnMeta, FileRecord, GraphResult, LineageEdge, ParseResult, ParseWarning
+from lineage.models import (
+    ColumnMeta,
+    FileRecord,
+    GraphResult,
+    LineageEdge,
+    ParseResult,
+    ParseWarning,
+    TraceStep,
+    TraceStepJoin,
+    TraceStepPredicate,
+    TraceStepWrite,
+)
 from parsers.sql import (
     parse_sql,
     DATABRICKS_SQL_SEP,
@@ -404,3 +417,275 @@ def trace_paths(raw_graph: nx.DiGraph, col_id: str, max_paths: int = 500) -> tup
 
     dfs(col_id, {col_id})
     return all_paths, truncated
+
+
+# ── Lineage Trace ────────────────────────────────────────────────────────────
+
+# Synthetic-column suffixes the SQL parser uses to mark predicate / join lineage.
+_FILTER_SUFFIXES: dict[str, str] = {
+    "__filter__": "where",
+    "__qualify__": "qualify",
+    "__having__": "having",
+}
+_JOIN_SUFFIX = "__joinkey__"
+_TRACE_TEMP_VIEW_DEPTH_CAP = 16
+
+
+def _is_synthetic_column(col_id: str) -> bool:
+    """A column whose name segment is wrapped in __ — the parser's predicate /
+    joinkey / placeholder convention. Used to keep synthetic targets out of the
+    upstream-columns chip list."""
+    if "." not in col_id:
+        return False
+    _, col = split_column_id(col_id)
+    return col.startswith("__") and col.endswith("__")
+
+
+def _kind_from_source_file(source_file: str | None) -> str:
+    """Coarse SQL-vs-PySpark classification by file extension. Notebooks count
+    as SQL when the dispatch path produced SQL edges and as Python otherwise —
+    here we use extension only since every edge already carries the file."""
+    if not source_file:
+        return "sql"
+    ext = os.path.splitext(source_file)[1].lower()
+    if ext == ".py":
+        return "pyspark"
+    if ext == ".ipynb":
+        return "pyspark"
+    return "sql"
+
+
+def _index_raw_graph(raw_graph: nx.DiGraph) -> tuple[
+    dict[str, list[LineageEdge]],
+    dict[str, list[LineageEdge]],
+]:
+    """Single-pass bucketing of raw_graph.edges() into target→edges and source→edges
+    indexes. Avoids re-scanning the graph for every column or temp-view lookup."""
+    by_target: dict[str, list[LineageEdge]] = {}
+    by_source: dict[str, list[LineageEdge]] = {}
+    for u, v, d in raw_graph.edges(data=True):
+        edge = d.get("data")
+        if edge is None:
+            continue
+        by_target.setdefault(v, []).append(edge)
+        by_source.setdefault(u, []).append(edge)
+    return by_target, by_source
+
+
+def _table_synthetic_targets(
+    by_target: dict[str, list[LineageEdge]], table: str, suffix: str
+) -> list[LineageEdge]:
+    """Return raw edges whose target column is `{table}.{suffix}` (e.g. agg_revenue.__filter__)."""
+    return list(by_target.get(f"{table}.{suffix}", []))
+
+
+def _is_temp_view_node(
+    table: str,
+    by_target: dict[str, list[LineageEdge]],
+    by_source: dict[str, list[LineageEdge]],
+    resolved_graph: nx.DiGraph,
+) -> bool:
+    """True when `table` is a temp-view-or-CTE node in raw_graph.
+
+    A temp view is a table that has writers in raw_graph but does NOT have any
+    real column nodes in the resolved lineage_graph (because resolve_temp_views
+    short-circuited it out). This is intentionally a derived check rather than
+    a parser-emitted flag: we don't introduce a new state global, and the
+    resolved-vs-raw asymmetry is exactly the signal we need.
+    """
+    has_writers = any(
+        tgt.startswith(f"{table}.")
+        for tgt in by_target.keys()
+    )
+    if not has_writers:
+        return False
+    # Real terminal table → some column on it exists in resolved graph.
+    for node in resolved_graph.nodes():
+        if "." in node:
+            t, _ = split_column_id(node)
+            if t == table:
+                return False
+    return True
+
+
+def _predicate_from_synthetic_edges(
+    edges: list[LineageEdge],
+    kind: Literal["where", "having", "qualify"],
+) -> list[TraceStepPredicate]:
+    """Group synthetic predicate edges by (expression, source_line) and collapse
+    each group into one TraceStepPredicate carrying the deduped source columns."""
+    groups: dict[tuple[str | None, int | None], TraceStepPredicate] = {}
+    for e in edges:
+        key = (e.expression, e.source_line)
+        pred = groups.get(key)
+        if pred is None:
+            pred = TraceStepPredicate(
+                kind=kind,
+                expression=e.expression,
+                source_columns=[],
+                source_line=e.source_line,
+            )
+            groups[key] = pred
+        if e.source_col not in pred.source_columns:
+            pred.source_columns.append(e.source_col)
+    return list(groups.values())
+
+
+def _joins_from_synthetic_edges(edges: list[LineageEdge]) -> list[TraceStepJoin]:
+    """Same shape as predicate grouping but for __joinkey__ edges."""
+    groups: dict[tuple[str | None, int | None], TraceStepJoin] = {}
+    for e in edges:
+        key = (e.expression, e.source_line)
+        join = groups.get(key)
+        if join is None:
+            join = TraceStepJoin(
+                expression=e.expression,
+                source_columns=[],
+                source_line=e.source_line,
+            )
+            groups[key] = join
+        if e.source_col not in join.source_columns:
+            join.source_columns.append(e.source_col)
+    return list(groups.values())
+
+
+def lineage_trace(
+    graph: nx.DiGraph,
+    raw_graph: nx.DiGraph,
+    table: str,
+    column: str,
+    max_steps: int = 50,
+) -> list[TraceStep]:
+    """Return Lineage Trace Steps for the column `{table}.{column}`.
+
+    Walks `raw_graph` upstream from the column's immediate writer edges,
+    groups them by source-table boundary, attaches sibling __filter__ /
+    __qualify__ / __having__ / __joinkey__ edges that target the writer's
+    target table, and rolls up predicates from collapsed temp-view / CTE
+    writers (annotated in `via_temp_views`).
+
+    Returns `[]` when the column does not exist in the resolved `graph`
+    (route translates to 404) or when the column has no writers (source-table
+    column). Truncates at `max_steps` Trace Steps, sorted by `(source_file,
+    source_line)`.
+    """
+    col_id = f"{table}.{column}"
+    if col_id not in graph:
+        return []
+
+    by_target, by_source = _index_raw_graph(raw_graph)
+
+    writer_edges = list(by_target.get(col_id, []))
+    if not writer_edges:
+        return []
+
+    # Group writer edges by (source_table, source_file, source_cell). One group → one Trace Step.
+    StepKey = tuple[str, str, int | None]
+    grouped: dict[StepKey, list[LineageEdge]] = {}
+    for e in writer_edges:
+        if "." not in e.source_col:
+            continue
+        src_tbl, _ = split_column_id(e.source_col)
+        key: StepKey = (src_tbl, e.source_file or "", e.source_cell)
+        grouped.setdefault(key, []).append(e)
+
+    steps: list[TraceStep] = []
+    for (src_tbl, src_file, src_cell), edges in grouped.items():
+        target_table = split_column_id(edges[0].target_col)[0]
+        step_lines = [e.source_line for e in edges if e.source_line is not None]
+        step_line = min(step_lines) if step_lines else None
+
+        writes = [
+            TraceStepWrite(
+                column_id=e.target_col,
+                expression=e.expression,
+                transform_type=e.transform_type,
+                source_line=e.source_line,
+            )
+            for e in edges
+        ]
+
+        filters: list[TraceStepPredicate] = []
+        joins: list[TraceStepJoin] = []
+        # Pull synthetic predicate / join edges that target the consuming target_table.
+        for suffix, kind in _FILTER_SUFFIXES.items():
+            filters.extend(
+                _predicate_from_synthetic_edges(
+                    _table_synthetic_targets(by_target, target_table, suffix),
+                    kind,
+                )
+            )
+        joins.extend(
+            _joins_from_synthetic_edges(
+                _table_synthetic_targets(by_target, target_table, _JOIN_SUFFIX)
+            )
+        )
+
+        # Walk upstream through any temp-view source tables to roll up their predicates.
+        via_temp_views: list[str] = []
+        seen_views: set[str] = set()
+        frontier: list[str] = [src_tbl]
+        depth = 0
+        while frontier and depth < _TRACE_TEMP_VIEW_DEPTH_CAP:
+            next_frontier: list[str] = []
+            for view in frontier:
+                if view in seen_views:
+                    continue
+                seen_views.add(view)
+                if not _is_temp_view_node(view, by_target, by_source, graph):
+                    continue
+                # This source IS a temp view: pull its predicates and joins.
+                via_temp_views.append(view)
+                for suffix, kind in _FILTER_SUFFIXES.items():
+                    filters.extend(
+                        _predicate_from_synthetic_edges(
+                            _table_synthetic_targets(by_target, view, suffix),
+                            kind,
+                        )
+                    )
+                joins.extend(
+                    _joins_from_synthetic_edges(
+                        _table_synthetic_targets(by_target, view, _JOIN_SUFFIX)
+                    )
+                )
+                # Walk upstream one hop: the temp view's own writer source tables.
+                for tgt, view_edges in by_target.items():
+                    if not tgt.startswith(f"{view}."):
+                        continue
+                    if any(view_edges[0].target_col.endswith(s) for s in (*_FILTER_SUFFIXES, _JOIN_SUFFIX)):
+                        continue
+                    for ve in view_edges:
+                        if "." in ve.source_col:
+                            up_tbl, _ = split_column_id(ve.source_col)
+                            if up_tbl not in seen_views:
+                                next_frontier.append(up_tbl)
+            frontier = next_frontier
+            depth += 1
+
+        # upstream_columns: deduped real-column source IDs from writes only.
+        upstream_columns: list[str] = []
+        seen_up: set[str] = set()
+        for e in edges:
+            if e.source_col == col_id:
+                continue
+            if _is_synthetic_column(e.source_col):
+                continue
+            if e.source_col not in seen_up:
+                seen_up.add(e.source_col)
+                upstream_columns.append(e.source_col)
+
+        steps.append(TraceStep(
+            kind=_kind_from_source_file(src_file),
+            source_file=src_file,
+            source_cell=src_cell,
+            source_line=step_line,
+            target_table=target_table,
+            writes=writes,
+            filters=filters,
+            joins=joins,
+            via_temp_views=via_temp_views,
+            upstream_columns=upstream_columns,
+        ))
+
+    steps.sort(key=lambda s: (s.source_file, s.source_line if s.source_line is not None else 0))
+    return steps[:max_steps]
