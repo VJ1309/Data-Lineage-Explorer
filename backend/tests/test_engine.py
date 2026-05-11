@@ -291,6 +291,25 @@ def test_lineage_trace_upstream_columns_excludes_synthetics():
         )
 
 
+def test_lineage_trace_writes_dedup_when_expression_has_multiple_source_columns():
+    # `a / NULLIF(b, 0)` references two source columns, so the parser emits
+    # one writer edge per source. The Trace Step's `writes` should collapse
+    # those into a single TraceStepWrite — `source_col` is not part of the
+    # write's identity.
+    sql = (
+        "INSERT INTO mart\n"
+        "SELECT a / NULLIF(b, 0) AS ratio FROM src"
+    )
+    graph, raw = _build_graphs(("r.sql", sql))
+    steps = lineage_trace(graph, raw, "mart", "ratio")
+    assert len(steps) == 1
+    s = steps[0]
+    assert len(s.writes) == 1, f"expected single write, got {len(s.writes)}: {s.writes}"
+    assert s.writes[0].column_id == "mart.ratio"
+    # Both source columns still show up as distinct upstream chips.
+    assert set(s.upstream_columns) == {"src.a", "src.b"}
+
+
 def test_lineage_trace_max_steps_truncates():
     blocks = [
         (f"f{i}.sql", f"INSERT INTO mart SELECT amount FROM src{i}")

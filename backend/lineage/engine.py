@@ -595,15 +595,23 @@ def lineage_trace(
         step_lines = [e.source_line for e in edges if e.source_line is not None]
         step_line = min(step_lines) if step_lines else None
 
-        writes = [
-            TraceStepWrite(
+        # Dedupe writes: a column expression like `a / NULLIF(b, 0)` produces one
+        # edge per source column (one for `a`, one for `b`) but is a single
+        # physical write. The writer's identity is (column_id, expression,
+        # transform_type, source_line); source_col is not part of TraceStepWrite.
+        writes: list[TraceStepWrite] = []
+        seen_writes: set[tuple[str, str, str, int | None]] = set()
+        for e in edges:
+            key = (e.target_col, e.expression or "", e.transform_type or "", e.source_line)
+            if key in seen_writes:
+                continue
+            seen_writes.add(key)
+            writes.append(TraceStepWrite(
                 column_id=e.target_col,
                 expression=e.expression,
                 transform_type=e.transform_type,
                 source_line=e.source_line,
-            )
-            for e in edges
-        ]
+            ))
 
         filters: list[TraceStepPredicate] = []
         joins: list[TraceStepJoin] = []
