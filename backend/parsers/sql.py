@@ -136,8 +136,10 @@ def _resolve_ctes(
     if not with_clause:
         # For CREATE TABLE/VIEW AS WITH ... SELECT ..., SQLGlot attaches the
         # WITH clause to the inner SELECT body, not the outer wrapper.
+        # `expression` may be a raw string on exp.Command fallbacks (e.g. DEEP CLONE),
+        # so only descend when it's a real Expression with .args.
         body = statement.args.get("expression")
-        if body is not None:
+        if isinstance(body, exp.Expression):
             with_clause = body.args.get("with_")
     if not with_clause:
         return simple_map, multi_map
@@ -648,12 +650,22 @@ def _parse_merge(
     source_file: str,
     source_line: int | None,
     source_cell: int | None,
+    cte_map: dict[str, str] | None = None,
+    multi_cte_bodies: dict[str, list[exp.Select]] | None = None,
 ) -> list[LineageEdge]:
     """Parse a MERGE INTO statement into column-level lineage edges.
 
     Handles both WHEN MATCHED THEN UPDATE and WHEN NOT MATCHED THEN INSERT branches.
     Ignores the ON predicate columns (those belong to __joinkey__ lineage, not data flow).
+
+    `cte_map` and `multi_cte_bodies` come from `_resolve_ctes(statement)` in the
+    caller. When the MERGE's USING clause names an outer CTE, we resolve it to
+    the underlying real source(s) here — otherwise the CTE alias surfaces as a
+    phantom 1-part source table in /tables. See plan 008 (U2).
     """
+    cte_map = cte_map or {}
+    multi_cte_bodies = multi_cte_bodies or {}
+
     target_node = merge.this
     using_node = merge.args.get("using")
     if not isinstance(target_node, exp.Table):
@@ -664,11 +676,32 @@ def _parse_merge(
     alias_map: dict[str, str] = {target_alias: target_table}
     source_tables: list[str] = [target_table]
     subquery_aliases: set[str] = set()
+    cte_using_alias: str | None = None
+    cte_using_body_selects: list[exp.Select] | None = None
+
     if isinstance(using_node, exp.Table):
-        using_qualified = _qualified_table_name(using_node)
         using_alias = using_node.alias or using_node.name
-        alias_map[using_alias] = using_qualified
-        source_tables.append(using_qualified)
+        if using_alias in cte_map:
+            # USING <outer CTE name> where the CTE has a single underlying table.
+            # Resolve the alias to the real table so column refs via the alias
+            # land on the right source rather than leaking as `<cte>.col` phantoms.
+            using_qualified = cte_map[using_alias]
+            alias_map[using_alias] = using_qualified
+            source_tables.append(using_qualified)
+        elif using_alias in multi_cte_bodies:
+            # USING <outer CTE name> where the CTE body has JOINs / UNIONs.
+            # Treat it like an inline subquery: parse each select body below,
+            # register the alias in subquery_aliases so resolve_temp_views
+            # short-circuits the chain to the real underlying tables.
+            cte_using_alias = using_alias
+            cte_using_body_selects = multi_cte_bodies[using_alias]
+            alias_map[using_alias] = using_alias
+            source_tables.append(using_alias)
+            subquery_aliases.add(using_alias)
+        else:
+            using_qualified = _qualified_table_name(using_node)
+            alias_map[using_alias] = using_qualified
+            source_tables.append(using_qualified)
     elif isinstance(using_node, exp.Subquery):
         sub_alias = using_node.alias or _next_sub_alias()
         alias_map[sub_alias] = sub_alias
@@ -714,14 +747,25 @@ def _parse_merge(
     # If the USING clause is a subquery, parse its body to get source column edges
     # (e.g. MERGE INTO t USING (SELECT id, val FROM staging WHERE active = 1) AS s)
     if isinstance(using_node, exp.Subquery):
-        sub_alias = next(iter(subquery_aliases), None)
+        sub_alias = using_node.alias or next(iter(subquery_aliases), None)
         if sub_alias:
             sub_selects = _collect_union_selects(using_node.this) if using_node.this else []
             for sub_sel in sub_selects:
                 edges.extend(_parse_select_node(
-                    sub_sel, sub_alias, {}, source_file, source_line, source_cell,
+                    sub_sel, sub_alias, cte_map, source_file, source_line, source_cell,
                     subquery_aliases=subquery_aliases,
                 ))
+
+    # If the USING clause names an outer multi-source CTE, parse each select body
+    # as a virtual subquery feeding the CTE alias — mirroring _parse_single_statement's
+    # multi_cte_bodies loop. resolve_temp_views then collapses the chain.
+    if cte_using_alias and cte_using_body_selects:
+        for cte_sel in cte_using_body_selects:
+            edges.extend(_parse_select_node(
+                cte_sel, cte_using_alias, cte_map,
+                source_file, source_line, source_cell,
+                subquery_aliases=subquery_aliases,
+            ))
 
     whens = merge.args.get("whens")
     if whens is None:
@@ -902,8 +946,15 @@ def _parse_single_statement(
     source_cell: int | None,
 ) -> list[LineageEdge]:
     """Parse a single SQL statement (handles UNION/UNION ALL) and return lineage edges."""
+    # Resolve CTEs up-front so MERGE dispatch sees them too — otherwise
+    # `WITH name AS (...) MERGE USING name` leaks `name.col` phantoms.
+    cte_map, multi_cte_bodies = _resolve_ctes(statement)
+
     if isinstance(statement, exp.Merge):
-        return _parse_merge(statement, source_file, source_line, source_cell)
+        return _parse_merge(
+            statement, source_file, source_line, source_cell,
+            cte_map=cte_map, multi_cte_bodies=multi_cte_bodies,
+        )
     if isinstance(statement, exp.Copy):
         return _parse_copy(statement, source_file, source_line, source_cell)
     if isinstance(statement, exp.Create) and statement.args.get("clone"):
@@ -921,7 +972,6 @@ def _parse_single_statement(
     if not select_nodes:
         return []
 
-    cte_map, multi_cte_bodies = _resolve_ctes(statement)
     target_table = _find_target_table(statement)
     subquery_aliases: set[str] = set()
     edges: list[LineageEdge] = []

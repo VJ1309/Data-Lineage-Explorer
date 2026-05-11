@@ -413,6 +413,38 @@ def test_tables_endpoint_real_tables_not_synthetic():
     assert by_name["target"]["synthetic"] is False
 
 
+def test_list_tables_excludes_merge_cte_phantom():
+    """Plan 008 / U2: WITH name AS (...) MERGE USING name must not leak the
+    CTE alias as a 1-part role=source row. Pre-fix `source` showed up in
+    /tables with no predecessors, inflating the Catalog source list."""
+    sql = """
+    WITH source AS (SELECT id, val FROM real_table)
+    MERGE INTO catalog.schema.target_table t
+    USING source
+    ON t.id = source.id
+    WHEN MATCHED THEN UPDATE SET t.val = source.val
+    WHEN NOT MATCHED THEN INSERT (id, val) VALUES (source.id, source.val)
+    """
+    zip_bytes = _make_zip({"q.sql": sql})
+    resp = client.post(
+        "/sources",
+        data={"source_type": "upload"},
+        files={"file": ("data.zip", zip_bytes, "application/zip")},
+    )
+    source_id = resp.json()["id"]
+    client.post(f"/sources/{source_id}/refresh")
+
+    rows = client.get("/tables").json()
+    by_name = {row["table"]: row for row in rows}
+    # The phantom: a 1-part `source` row marked role=source.
+    assert "source" not in by_name, (
+        f"CTE alias 'source' leaked into /tables: {[(r['table'], r['role']) for r in rows]}"
+    )
+    # The real upstream is registered as a source
+    assert "real_table" in by_name
+    assert by_name["real_table"]["role"] == "source"
+
+
 def test_tables_endpoint_excludes_collapsed_for_cursor_view():
     """A FOR cursor's __for_<id>__ synthetic temp view is collapsed by
     resolve_temp_views — it must not appear in /tables at all (real source

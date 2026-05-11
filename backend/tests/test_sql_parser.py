@@ -1209,6 +1209,83 @@ def test_merge_using_subquery_with_not_matched_insert():
     )
 
 
+def test_merge_using_named_outer_cte_resolves_simple():
+    """WITH name AS (SELECT cols FROM real) MERGE USING name — alias resolves to real."""
+    sql = """
+    WITH source AS (SELECT id, val FROM real_table)
+    MERGE INTO target t
+    USING source
+    ON t.id = source.id
+    WHEN MATCHED THEN UPDATE SET t.val = source.val
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    sources = {e.source_col for e in edges}
+    # The phantom: a 1-part 'source.val' source. Must not appear.
+    assert not any(s.startswith("source.") for s in sources), (
+        f"CTE alias 'source' leaked as phantom: {sources}"
+    )
+    # The real lineage: real_table.val → target.val
+    assert "real_table.val" in sources, (
+        f"underlying real_table not traced through CTE: {sources}"
+    )
+
+
+def test_merge_using_named_outer_cte_no_phantom_alias():
+    """The CTE alias name must not show up as a 1-part source table anywhere."""
+    sql = """
+    WITH source AS (SELECT a, b FROM upstream)
+    MERGE INTO tgt t
+    USING source
+    ON t.a = source.a
+    WHEN NOT MATCHED THEN INSERT (a, b) VALUES (source.a, source.b)
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    src_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    assert "source" not in src_tables, (
+        f"CTE alias 'source' surfaced as 1-part source: {src_tables}"
+    )
+    # All real lineage targets `upstream` (the CTE body's FROM)
+    assert any(t.startswith("upstream") for t in src_tables), (
+        f"upstream not traced through CTE alias: {src_tables}"
+    )
+
+
+def test_merge_using_named_outer_cte_multi_source():
+    """Multi-source CTE (with JOIN) feeding MERGE USING resolves to underlying tables."""
+    sql = """
+    WITH source AS (SELECT r1.id AS id, r2.val AS val FROM r1 JOIN r2 ON r1.id = r2.id)
+    MERGE INTO target t
+    USING source
+    ON t.id = source.id
+    WHEN MATCHED THEN UPDATE SET t.val = source.val
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    src_tables = {e.source_col.rsplit(".", 1)[0] for e in edges}
+    # No 1-part 'source' phantom
+    assert "source" not in src_tables, (
+        f"multi-source CTE alias leaked: {src_tables}"
+    )
+    # The underlying JOIN tables are surfaced
+    assert {"r1", "r2"} & src_tables, (
+        f"underlying JOIN tables not traced: {src_tables}"
+    )
+
+
+def test_merge_using_real_table_unchanged():
+    """USING <real table> (no name collision with any CTE) keeps the existing behavior."""
+    sql = """
+    MERGE INTO target t
+    USING staging s
+    ON t.id = s.id
+    WHEN MATCHED THEN UPDATE SET t.val = s.val
+    """
+    edges = parse_sql(sql, source_file="m.sql", source_line=1).edges
+    sources = {e.source_col for e in edges}
+    assert "staging.val" in sources, (
+        f"real table USING regressed; sources={sources}"
+    )
+
+
 # ── R6: COPY INTO detect-and-degrade ──────────────────────────────────────────
 
 def test_copy_into_emits_approximate_wildcard_edge():
