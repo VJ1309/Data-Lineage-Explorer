@@ -21,10 +21,10 @@ function JoinIcon() {
 
 function FilePill({ file, line }: { file: string; line: number | null }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-      <FileText className="h-3 w-3" aria-hidden />
+    <span className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/50 px-2 py-1 font-mono text-xs text-muted-foreground">
+      <FileText className="h-3.5 w-3.5" aria-hidden />
       <span>{shortFile(file)}</span>
-      {line != null && <span className="text-muted-foreground/60">·{line}</span>}
+      {line != null && <span className="text-muted-foreground/80">·{line}</span>}
     </span>
   );
 }
@@ -35,7 +35,7 @@ function ViaTempViewBadge({ names }: { names: string[] }) {
   const overflow = names.length - visible.length;
   return (
     <span
-      className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400"
+      className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-300"
       title={`Predicates rolled up via: ${names.join(", ")}`}
     >
       via {visible.join(", ")}
@@ -64,15 +64,15 @@ function StepCard({
     step.filters.length > 0 || step.joins.length > 0 || tracedWrites.length > 0;
 
   return (
-    <article className="rounded-md border border-border/60 bg-card/50 p-3 space-y-2.5">
+    <article className="rounded-md border border-border/70 bg-card/60 p-3.5 space-y-3">
       {/* Header: target table, file:line, via temp views */}
       <header className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-xs font-medium text-foreground">
+          <span className="font-mono text-sm font-semibold text-foreground">
             {step.target_table}
           </span>
           {step.kind === "pyspark" && (
-            <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+            <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               PySpark
             </span>
           )}
@@ -84,25 +84,25 @@ function StepCard({
       </header>
 
       {!hasContent && (
-        <p className="text-[11px] italic text-muted-foreground/70">
+        <p className="text-xs italic text-muted-foreground">
           No filter or join recorded for this step.
         </p>
       )}
 
       {/* Traced column writes (the column being inspected) */}
       {tracedWrites.length > 0 && (
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           {tracedWrites.map((w, i) => (
             <div
               key={`tw-${i}`}
-              className="rounded bg-muted/30 px-2 py-1.5 text-[11px] font-mono text-foreground/80"
+              className="rounded bg-muted/40 px-2.5 py-2 text-xs font-mono text-foreground leading-relaxed"
             >
-              <span className="text-muted-foreground">{selectedColName}</span>
+              <span className="text-foreground font-medium">{selectedColName}</span>
               {w.expression && w.expression !== "*" && (
-                <span className="text-muted-foreground/50"> · </span>
+                <span className="text-muted-foreground"> · </span>
               )}
               {w.expression && w.expression !== "*" && (
-                <span className="break-all">{w.expression}</span>
+                <span className="break-all text-foreground/95">{w.expression}</span>
               )}
             </div>
           ))}
@@ -110,7 +110,7 @@ function StepCard({
             <button
               type="button"
               onClick={() => setShowAllWrites((s) => !s)}
-              className="text-[10px] text-muted-foreground/70 hover:text-foreground transition-colors"
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
               {showAllWrites
                 ? `Hide ${otherWrites.length} other write${otherWrites.length === 1 ? "" : "s"}`
@@ -123,12 +123,12 @@ function StepCard({
               return (
                 <div
                   key={`ow-${i}`}
-                  className="rounded bg-muted/15 px-2 py-1 text-[11px] font-mono text-muted-foreground"
+                  className="rounded bg-muted/20 px-2.5 py-1.5 text-xs font-mono text-muted-foreground leading-relaxed"
                 >
                   <span>{c}</span>
                   {w.expression && w.expression !== "*" && (
                     <>
-                      <span className="text-muted-foreground/50"> · </span>
+                      <span className="text-muted-foreground/70"> · </span>
                       <span className="break-all">{w.expression}</span>
                     </>
                   )}
@@ -140,22 +140,22 @@ function StepCard({
 
       {/* Filters */}
       {step.filters.length > 0 && (
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           {step.filters.map((f, i) => (
             <div
               key={`f-${i}`}
-              className="flex items-start gap-2 rounded bg-rose-500/5 px-2 py-1.5 text-[11px]"
+              className="flex items-start gap-2.5 rounded bg-rose-500/8 px-2.5 py-2 text-xs"
             >
               <span className="mt-0.5">
                 <FilterIcon />
               </span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[9px] uppercase tracking-wider text-rose-400/80">
+                  <span className="text-[10px] uppercase tracking-wider text-rose-300 font-medium">
                     {f.kind}
                   </span>
                 </div>
-                <div className="font-mono text-foreground/80 break-all">
+                <div className="font-mono text-foreground break-all leading-relaxed">
                   {f.expression ?? <span className="italic text-muted-foreground">(predicate)</span>}
                 </div>
               </div>
@@ -166,22 +166,22 @@ function StepCard({
 
       {/* Joins */}
       {step.joins.length > 0 && (
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           {step.joins.map((j, i) => (
             <div
               key={`j-${i}`}
-              className="flex items-start gap-2 rounded bg-blue-500/5 px-2 py-1.5 text-[11px]"
+              className="flex items-start gap-2.5 rounded bg-blue-500/8 px-2.5 py-2 text-xs"
             >
               <span className="mt-0.5">
                 <JoinIcon />
               </span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[9px] uppercase tracking-wider text-blue-400/80">
+                  <span className="text-[10px] uppercase tracking-wider text-blue-300 font-medium">
                     join on
                   </span>
                 </div>
-                <div className="font-mono text-foreground/80 break-all">
+                <div className="font-mono text-foreground break-all leading-relaxed">
                   {j.expression ?? <span className="italic text-muted-foreground">(join key)</span>}
                 </div>
               </div>
@@ -192,8 +192,8 @@ function StepCard({
 
       {/* Upstream chips */}
       {step.upstream_columns.length > 0 && (
-        <footer className="pt-1 space-y-1.5 border-t border-border/40">
-          <p className="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+        <footer className="pt-2 space-y-2 border-t border-border/50">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground font-medium">
             Upstream
           </p>
           <div className="flex flex-wrap gap-1.5">
@@ -207,10 +207,10 @@ function StepCard({
                     type="button"
                     onClick={() => onExpand(up)}
                     aria-expanded={isExpanded}
-                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-mono transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 focus:ring-offset-background ${
+                    className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-mono transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 focus:ring-offset-background ${
                       isExpanded
                         ? "border-primary/60 bg-primary/10 text-foreground"
-                        : "border-border/60 bg-muted/30 text-muted-foreground hover:text-foreground hover:border-border"
+                        : "border-border/70 bg-muted/40 text-foreground/90 hover:text-foreground hover:bg-muted/60 hover:border-border"
                     }`}
                   >
                     <ChevronRight
@@ -218,7 +218,7 @@ function StepCard({
                         isExpanded ? "rotate-90" : ""
                       }`}
                     />
-                    <span className="text-muted-foreground/60">{upTblShort}.</span>
+                    <span className="text-muted-foreground">{upTblShort}.</span>
                     <span>{upCol}</span>
                   </button>
                   {isExpanded && (
@@ -243,8 +243,8 @@ export function LineageTrace({ colId }: { colId: string }) {
 
   if (isLoading) {
     return (
-      <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
-        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+      <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
         <span>Loading trace…</span>
       </div>
     );
@@ -252,9 +252,9 @@ export function LineageTrace({ colId }: { colId: string }) {
 
   if (isError) {
     return (
-      <div className="flex items-start gap-2 rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-xs">
-        <AlertCircle className="h-3 w-3 mt-0.5 text-rose-400" aria-hidden />
-        <span className="text-rose-300">
+      <div className="flex items-start gap-2 rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-sm">
+        <AlertCircle className="h-3.5 w-3.5 mt-0.5 text-rose-400" aria-hidden />
+        <span className="text-rose-200">
           {(error as Error)?.message ?? "Failed to load trace"}
         </span>
       </div>
@@ -263,16 +263,16 @@ export function LineageTrace({ colId }: { colId: string }) {
 
   if (!data || data.steps.length === 0) {
     return (
-      <p className="text-xs italic text-muted-foreground/70">
+      <p className="text-sm italic text-muted-foreground">
         Source column — end of trace.
       </p>
     );
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       {data.steps.length > 1 && (
-        <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-[11px] text-amber-300">
+        <div className="rounded border border-amber-500/40 bg-amber-500/8 px-3 py-2 text-xs text-amber-200 font-medium">
           {data.steps.length} writers · all scopes shown
         </div>
       )}

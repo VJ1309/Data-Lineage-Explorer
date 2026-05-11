@@ -1,11 +1,54 @@
 "use client";
+import { useCallback, useState } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { GitBranch } from "lucide-react";
+import { Check, Copy, GitBranch } from "lucide-react";
 import { TransformBadge } from "./transform-badge";
 import { LineageTrace } from "./lineage-trace";
 import type { LineageEdge } from "@/lib/api";
 import { splitColumnId } from "@/lib/utils";
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-3 pb-1 border-b border-border/60">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-foreground/85">
+        {children}
+      </p>
+      <div className="flex-1 h-px bg-border/30" />
+    </div>
+  );
+}
+
+function CopyExpression({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    });
+  }, [text]);
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? "Copied" : "Copy expression"}
+      aria-label={copied ? "Copied" : "Copy expression"}
+      className="absolute top-2 right-2 inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/70 px-1.5 py-1 text-[11px] font-medium text-muted-foreground opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-foreground hover:bg-background/90 transition-all"
+    >
+      {copied ? (
+        <>
+          <Check className="h-3 w-3 text-green-400" />
+          <span className="text-green-400">Copied</span>
+        </>
+      ) : (
+        <>
+          <Copy className="h-3 w-3" />
+          <span>Copy</span>
+        </>
+      )}
+    </button>
+  );
+}
 
 function detectLang(file: string | null): string {
   if (!file) return "sql";
@@ -65,11 +108,11 @@ export function ColumnInspector({
     });
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="space-y-7 max-w-3xl">
       {/* Column header */}
       <div>
-        <p className="text-xs font-mono text-muted-foreground/60 mb-0.5">{table}</p>
-        <h2 className="font-mono font-semibold text-xl text-foreground">{col}</h2>
+        <p className="text-sm font-mono text-muted-foreground mb-1">{table}</p>
+        <h2 className="font-mono font-semibold text-2xl text-foreground tracking-tight">{col}</h2>
       </div>
 
       {incoming.length === 0 ? (
@@ -79,27 +122,28 @@ export function ColumnInspector({
       ) : (
         <>
           {/* SQL Logic */}
-          <section className="space-y-2.5">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-              SQL Logic
-            </p>
+          <section className="space-y-3">
+            <SectionLabel>SQL Logic</SectionLabel>
             {withExpression.length > 0 ? (
               withExpression.map((e, i) => (
-                <div key={i} className="space-y-1">
+                <div key={i} className="space-y-1.5">
                   {e.source_file && (
-                    <p className="text-[10px] font-mono text-muted-foreground/50">
+                    <p className="text-xs font-mono text-muted-foreground">
                       {e.source_file.split(/[\\/]/).at(-1)}
-                      {e.source_line != null ? ` · line ${e.source_line}` : ""}
+                      {e.source_line != null ? (
+                        <span className="text-muted-foreground/70"> · line {e.source_line}</span>
+                      ) : null}
                     </p>
                   )}
-                  <div className="rounded-md overflow-hidden ring-1 ring-border/40 max-h-48 overflow-y-auto">
+                  <div className="relative group rounded-md overflow-hidden ring-1 ring-border/50 max-h-56 overflow-y-auto bg-[#1e1e1e]">
                     <SyntaxHighlighter
                       language={detectLang(e.source_file)}
                       style={vscDarkPlus}
-                      customStyle={{ margin: 0, fontSize: 12, padding: "10px 14px", lineHeight: "1.6" }}
+                      customStyle={{ margin: 0, fontSize: 13, padding: "12px 16px", lineHeight: "1.65" }}
                     >
                       {e.expression!}
                     </SyntaxHighlighter>
+                    <CopyExpression text={e.expression!} />
                   </div>
                 </div>
               ))
@@ -111,11 +155,9 @@ export function ColumnInspector({
           </section>
 
           {/* Column Transformations */}
-          <section className="space-y-2.5">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-              Column Transformations
-            </p>
-            <div className="rounded-md border border-border overflow-hidden">
+          <section className="space-y-3">
+            <SectionLabel>Column Transformations</SectionLabel>
+            <div className="rounded-md border border-border overflow-hidden bg-card/40">
               {incoming.map((e, i) => {
                 const [srcTbl, srcCol] = splitColumnId(e.source_col);
                 const srcTblShort = srcTbl.split(".").at(-1) || srcTbl;
@@ -133,24 +175,24 @@ export function ColumnInspector({
                 return (
                   <div
                     key={i}
-                    className={`grid grid-cols-[minmax(100px,1fr)_auto_minmax(0,2fr)] items-center gap-3 px-3 py-2.5 text-xs${
-                      i > 0 ? " border-t border-border" : ""
+                    className={`grid grid-cols-[minmax(140px,1fr)_auto_minmax(0,2fr)] items-center gap-3 px-3.5 py-3 text-sm transition-colors hover:bg-muted/30${
+                      i > 0 ? " border-t border-border/70" : ""
                     }`}
                   >
                     <span
-                      className="font-mono text-muted-foreground truncate"
+                      className="font-mono text-foreground truncate"
                       title={e.source_col}
                     >
-                      <span className="text-muted-foreground/50">{srcTblShort}.</span>
+                      <span className="text-muted-foreground">{srcTblShort}.</span>
                       {srcCol}
                     </span>
                     <TransformBadge type={displayType} />
                     <span
-                      className="font-mono text-foreground/70 truncate"
+                      className="font-mono text-foreground truncate"
                       title={logic ?? "passthrough"}
                     >
                       {logic ?? (
-                        <span className="italic text-muted-foreground/50">passthrough</span>
+                        <span className="italic text-muted-foreground">passthrough</span>
                       )}
                     </span>
                   </div>
@@ -160,10 +202,8 @@ export function ColumnInspector({
           </section>
 
           {/* Lineage Trace */}
-          <section className="space-y-2.5">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-              Lineage Trace
-            </p>
+          <section className="space-y-3">
+            <SectionLabel>Lineage Trace</SectionLabel>
             <LineageTrace colId={colId} />
           </section>
         </>
