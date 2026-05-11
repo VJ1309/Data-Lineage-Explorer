@@ -1,10 +1,20 @@
 ---
 title: "feat: Show full SQL context for passthrough transformations"
 type: feat
-status: completed
+status: superseded
+superseded_by: docs/plans/2026-05-11-008-fix-parser-bugs-from-real-data-plan.md
 date: 2026-04-28
 origin: docs/brainstorms/2026-04-28-passthrough-sql-context-requirements.md
 ---
+
+> **Superseded 2026-05-11 by plan 008.** Real-data testing on SMT.zip
+> showed that stamping the full SELECT body on every passthrough column
+> produces unusable output for wide tables (119 cols × 200-line SELECT in
+> the Transform tab). Plan 008 (U1) inverts the contract back to per-column
+> expressions and inverts the 8 enforcement tests added here. If we want
+> surrounding SQL context in the UI, it belongs on the Trace Step header
+> (one copy per statement), not stamped on every column edge — see plan 008's
+> Scope Boundaries for rationale.
 
 # feat: Show full SQL context for passthrough transformations
 
