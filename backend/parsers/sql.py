@@ -652,6 +652,7 @@ def _parse_merge(
     source_cell: int | None,
     cte_map: dict[str, str] | None = None,
     multi_cte_bodies: dict[str, list[exp.Select]] | None = None,
+    warnings: list[str] | None = None,
 ) -> list[LineageEdge]:
     """Parse a MERGE INTO statement into column-level lineage edges.
 
@@ -662,6 +663,9 @@ def _parse_merge(
     caller. When the MERGE's USING clause names an outer CTE, we resolve it to
     the underlying real source(s) here — otherwise the CTE alias surfaces as a
     phantom 1-part source table in /tables. See plan 008 (U2).
+
+    When `warnings` is supplied, the INSERT branch appends a soft warning if it
+    sees a reference to a column the USING subquery does not produce (plan 008 / U3).
     """
     cte_map = cte_map or {}
     multi_cte_bodies = multi_cte_bodies or {}
@@ -744,17 +748,35 @@ def _parse_merge(
 
     edges: list[LineageEdge] = []
 
+    # Track what the USING subquery actually emits, so the INSERT branch can
+    # spot references to columns the subquery does not produce (Bug B1).
+    using_sub_alias: str | None = None
+    subquery_output_cols: set[str] = set()
+    subquery_real_tables: set[str] = set()
+
     # If the USING clause is a subquery, parse its body to get source column edges
     # (e.g. MERGE INTO t USING (SELECT id, val FROM staging WHERE active = 1) AS s)
     if isinstance(using_node, exp.Subquery):
-        sub_alias = using_node.alias or next(iter(subquery_aliases), None)
-        if sub_alias:
+        using_sub_alias = using_node.alias or next(iter(subquery_aliases), None)
+        if using_sub_alias:
             sub_selects = _collect_union_selects(using_node.this) if using_node.this else []
             for sub_sel in sub_selects:
                 edges.extend(_parse_select_node(
-                    sub_sel, sub_alias, cte_map, source_file, source_line, source_cell,
+                    sub_sel, using_sub_alias, cte_map, source_file, source_line, source_cell,
                     subquery_aliases=subquery_aliases,
                 ))
+            prefix = f"{using_sub_alias}."
+            for e in edges:
+                if not e.target_col.startswith(prefix):
+                    continue
+                col_name = e.target_col[len(prefix):]
+                # Skip meta columns (__filter__, __joinkey__, etc.) — not real outputs
+                if col_name.startswith("__"):
+                    continue
+                subquery_output_cols.add(col_name)
+                src_tbl = e.source_col.rsplit(".", 1)[0] if "." in e.source_col else e.source_col
+                if src_tbl and src_tbl != using_sub_alias:
+                    subquery_real_tables.add(src_tbl)
 
     # If the USING clause names an outer multi-source CTE, parse each select body
     # as a virtual subquery feeding the CTE alias — mirroring _parse_single_statement's
@@ -819,6 +841,37 @@ def _parse_merge(
                 if col_refs:
                     for cref in col_refs:
                         src_name, src_tbl = _col_name(cref)
+                        # Bug B1: INSERT VALUES references a column the USING
+                        # subquery does not emit. Without this guard the parser
+                        # produces a phantom `<sub_alias>.<col>` source table.
+                        if (
+                            using_sub_alias is not None
+                            and cref.table == using_sub_alias
+                            and src_name not in subquery_output_cols
+                        ):
+                            if warnings is not None:
+                                warnings.append(
+                                    f"MERGE INSERT references '{using_sub_alias}.{src_name}' "
+                                    f"but the USING subquery does not produce a column '{src_name}'"
+                                )
+                            # Best-effort fallback: when the subquery body has a
+                            # single underlying real table, attribute the column
+                            # to it with approximate confidence. Otherwise drop
+                            # the edge so the phantom never enters the graph.
+                            if len(subquery_real_tables) == 1:
+                                real_tbl = next(iter(subquery_real_tables))
+                                edges.append(LineageEdge(
+                                    source_col=f"{real_tbl}.{src_name}",
+                                    target_col=target_col,
+                                    transform_type=transform_type,
+                                    expression=expr_str,
+                                    source_file=source_file,
+                                    source_cell=source_cell,
+                                    source_line=source_line,
+                                    confidence="approximate",
+                                    qualified=False,
+                                ))
+                            continue
                         edges.append(_make_edge(
                             source_col=f"{src_tbl or default_table}.{src_name}",
                             target_col=target_col,
@@ -944,6 +997,7 @@ def _parse_single_statement(
     source_file: str,
     source_line: int | None,
     source_cell: int | None,
+    warnings: list[str] | None = None,
 ) -> list[LineageEdge]:
     """Parse a single SQL statement (handles UNION/UNION ALL) and return lineage edges."""
     # Resolve CTEs up-front so MERGE dispatch sees them too — otherwise
@@ -954,6 +1008,7 @@ def _parse_single_statement(
         return _parse_merge(
             statement, source_file, source_line, source_cell,
             cte_map=cte_map, multi_cte_bodies=multi_cte_bodies,
+            warnings=warnings,
         )
     if isinstance(statement, exp.Copy):
         return _parse_copy(statement, source_file, source_line, source_cell)
@@ -1303,7 +1358,10 @@ def parse_sql(
         if _is_temp_view(statement) and isinstance(statement.this, exp.Table):
             temp_views.add(_qualified_table_name(statement.this))
         edges.extend(
-            _parse_single_statement(statement, source_file, source_line, source_cell)
+            _parse_single_statement(
+                statement, source_file, source_line, source_cell,
+                warnings=local_warnings,
+            )
         )
     raw_edges = list(edges)
     if _resolve_views and temp_views:

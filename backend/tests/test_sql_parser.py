@@ -1286,6 +1286,76 @@ def test_merge_using_real_table_unchanged():
     )
 
 
+def test_merge_insert_unknown_subquery_column_warns():
+    """Plan 008 / U3: MERGE INSERT references a column the USING subquery does
+    not emit. Single-table subquery → best-effort approximate edge to that
+    real table; warning is appended so the user sees the issue in /warnings."""
+    sql = """
+    MERGE INTO target t
+    USING (SELECT id FROM real_table) AS s
+    ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT (id, extra) VALUES (s.id, s.extra)
+    """
+    r = parse_sql(sql, source_file="m.sql", source_line=1)
+    sources = {e.source_col for e in r.edges}
+    # No phantom `s.extra` source
+    assert not any(src.startswith("s.") for src in sources), (
+        f"subquery alias 's' leaked as phantom: {sources}"
+    )
+    # Best-effort edge to the single real source
+    assert "real_table.extra" in sources, (
+        f"missing best-effort edge to underlying real table: {sources}"
+    )
+    extra_edge = next(e for e in r.edges if e.source_col == "real_table.extra")
+    assert extra_edge.confidence == "approximate", (
+        f"unknown-subquery-col edge must be approximate; got {extra_edge.confidence}"
+    )
+    # Warning was emitted
+    assert any("does not produce a column 'extra'" in w for w in r.warnings), (
+        f"missing warning about unknown subquery column; got warnings={r.warnings}"
+    )
+
+
+def test_merge_insert_unknown_col_ambiguous_drops_edge():
+    """When the subquery body has multiple real upstream tables and the INSERT
+    references a column none of them produce, drop the edge entirely (no
+    phantom, ambiguous attribution). The warning is the user's signal."""
+    sql = """
+    MERGE INTO target t
+    USING (SELECT r1.id, r2.val FROM r1 JOIN r2 ON r1.id = r2.id) AS s
+    ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT (id, val, foo) VALUES (s.id, s.val, s.foo)
+    """
+    r = parse_sql(sql, source_file="m.sql", source_line=1)
+    target_cols = {e.target_col for e in r.edges}
+    # foo never lands anywhere — the phantom is suppressed
+    assert "target.foo" not in target_cols, (
+        f"ambiguous unknown-col edge should be dropped; got targets={target_cols}"
+    )
+    # The known cols still flow through to target
+    assert "target.id" in target_cols
+    assert "target.val" in target_cols
+    # Warning emitted
+    assert any("does not produce a column 'foo'" in w for w in r.warnings), (
+        f"missing warning about unknown subquery column; got warnings={r.warnings}"
+    )
+
+
+def test_merge_insert_known_cols_no_warning():
+    """When INSERT VALUES only references columns the USING subquery emits,
+    no warning is added (regression — keep the silent happy path silent)."""
+    sql = """
+    MERGE INTO target t
+    USING (SELECT id, val FROM real_table) AS s
+    ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+    """
+    r = parse_sql(sql, source_file="m.sql", source_line=1)
+    assert not any(
+        "does not produce a column" in w for w in r.warnings
+    ), f"unexpected warning on happy path; got warnings={r.warnings}"
+
+
 # ── R6: COPY INTO detect-and-degrade ──────────────────────────────────────────
 
 def test_copy_into_emits_approximate_wildcard_edge():
