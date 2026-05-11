@@ -516,12 +516,6 @@ def _parse_select_node(
     _emit_predicate_edges(select_node.args.get("qualify"), "__qualify__", "filter")
     _emit_predicate_edges(select_node.args.get("having"), "__having__", "filter")
 
-    # Full SELECT SQL used as expression for passthrough edges (computed once, shared by all columns)
-    try:
-        full_sql = select_node.sql(dialect="databricks", pretty=True)
-    except Exception:
-        full_sql = None
-
     # Walk SELECT expressions
     for sel in select_node.selects:
         if isinstance(sel, exp.Alias):
@@ -539,7 +533,15 @@ def _parse_select_node(
 
         target_col = f"{target_table}.{alias}"
         transform_type, expr_str = _classify_transform(expr_node)
-        passthrough_expr = full_sql if transform_type == "passthrough" and full_sql else expr_str
+        # Per-column expression: for renamed passthrough columns (SELECT a AS b)
+        # preserve the rename so the user can see what each column does.
+        if transform_type == "passthrough" and isinstance(sel, exp.Alias):
+            try:
+                col_expr = sel.sql(dialect="databricks")
+            except Exception:
+                col_expr = expr_str
+        else:
+            col_expr = expr_str
 
         if transform_type == "window":
             win_col_refs = list(expr_node.find_all(exp.Column))
@@ -591,7 +593,7 @@ def _parse_select_node(
                 source_col=f"{default_table}.{alias}",
                 target_col=target_col,
                 transform_type=transform_type,
-                expression=passthrough_expr,
+                expression=col_expr,
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
@@ -611,7 +613,7 @@ def _parse_select_node(
                         source_col=src_id,
                         target_col=target_col,
                         transform_type=transform_type,
-                        expression=passthrough_expr,
+                        expression=col_expr,
                         source_file=source_file,
                         source_cell=source_cell,
                         source_line=source_line,
@@ -630,7 +632,7 @@ def _parse_select_node(
                 source_col=source_col,
                 target_col=target_col,
                 transform_type=transform_type,
-                expression=passthrough_expr,
+                expression=col_expr,
                 source_file=source_file,
                 source_cell=source_cell,
                 source_line=source_line,
